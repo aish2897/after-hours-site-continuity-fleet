@@ -28,30 +28,31 @@ This table is the project's honesty mechanism.
 Nothing in this repo, the demo video, or the Devpost entry may claim a
 capability beyond the state recorded here.
 
-**"(dev runtime)" means the capability was exercised for real against Google
-Cloud from the local development machine, not from a deployed Cloud Run
-service.** No backend is deployed yet. Those rows become plain `VERIFIED` only
-once the same capability is proven running on Cloud Run.
-
 | Capability | Status | Evidence |
 |---|---|---|
-| Gemini 3.7 Flash via Vertex AI | **`VERIFIED`** (dev runtime) | [`gate-a-vertex-gemini.md`](docs/evidence/gate-a-vertex-gemini.md) |
-| Google ADK agent, typed output | **`VERIFIED`** (dev runtime) | [`gate-a-adk-routing.md`](docs/evidence/gate-a-adk-routing.md) |
-| Evidence-dependent specialist routing | **`VERIFIED`** (dev runtime) | [`gate-a-adk-routing.md`](docs/evidence/gate-a-adk-routing.md) |
+| Gemini 3.7 Flash via Vertex AI | **`VERIFIED`** | [`gate-b`](docs/evidence/gate-b-cloud-run-firestore.md) · [`gate-a`](docs/evidence/gate-a-vertex-gemini.md) |
+| Google ADK agent, typed output | **`VERIFIED`** | [`gate-b`](docs/evidence/gate-b-cloud-run-firestore.md) · [`gate-a`](docs/evidence/gate-a-adk-routing.md) |
+| Evidence-dependent specialist routing | **`VERIFIED`** | [`gate-b`](docs/evidence/gate-b-cloud-run-firestore.md) |
+| Cloud Run service (Sydney, authenticated) | **`VERIFIED`** | [`gate-b`](docs/evidence/gate-b-cloud-run-firestore.md) |
+| Firestore durable incident state (Sydney) | **`VERIFIED`** | [`gate-b`](docs/evidence/gate-b-cloud-run-firestore.md) |
+| Structured Cloud Logging correlation | **`VERIFIED`** | [`gate-b`](docs/evidence/gate-b-cloud-run-firestore.md) |
 | Deterministic policy gate | `IMPLEMENTED` | `tests/policy/test_decision_matrix.py` — 26 |
 | Agent capability registry | `IMPLEMENTED` | `tests/policy/test_registry.py` — 9 |
 | Incident state machine | `IMPLEMENTED` | `tests/unit/test_state_machine.py` — 15 |
 | Deterministic idempotency keys | `IMPLEMENTED` | `tests/unit/test_ids.py` — 8 |
 | Hash-chained audit + tamper detection | `IMPLEMENTED` | `tests/unit/test_audit_chain.py` — 9 |
 | Trusted/untrusted evidence separation | `IMPLEMENTED` | `tests/policy/test_decision_matrix.py` |
-| Cloud Run services | `NOT INTEGRATED` | Gate B |
-| Firestore durable state | `NOT INTEGRATED` | Gate B |
+| Cloud Trace end-to-end spans | `NOT INTEGRATED` | logging correlation only so far |
 | Real IAM permission boundaries | `NOT INTEGRATED` | 3 proofs required |
 | Real remediation on a live service | `NOT INTEGRATED` | `dispatch-web` |
-| Cloud Logging / Trace correlation | `NOT INTEGRATED` | — |
 | Model Armor | `NOT INTEGRATED` | after first remediation path |
+| Resumable / crash-resumable workflow | `NOT INTEGRATED` | durable persistence only |
 | Resumable human approval | `NOT INTEGRATED` | out of slice 1 |
 | Web UI | `NOT INTEGRATED` | out of slice 1 |
+
+Gate B proved durable persistence, not resumability: incident state survives
+container replacement, but no interrupted workflow resumes yet. Cloud Logging
+entries share a trace id; **no span has been exported to Cloud Trace**.
 
 ## What exists today
 

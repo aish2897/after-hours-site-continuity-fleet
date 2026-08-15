@@ -20,7 +20,7 @@ executor is allowed to remediate *one specific service*".
 
 | Service account | Firestore | Cloud Run | Vertex | Notes |
 |---|---|---|---|---|
-| `sa-orchestrator` | `datastore.user` | `run.invoker` on tools-*, executor | `aiplatform.user` | Sole agent-side writer |
+| `sa-orchestrator` | `datastore.user` | *(none yet)* | `aiplatform.user` | **CREATED.** Sole agent-side writer |
 | `sa-agent-systems` | `datastore.viewer` | — | `aiplatform.user` | Stateless investigator |
 | `sa-agent-network` | `datastore.viewer` | — | `aiplatform.user` | Slice 2 |
 | `sa-agent-security` | `datastore.viewer` | — | `aiplatform.user` | Slice 2; Model Armor caller |
@@ -58,7 +58,25 @@ A fourth, incidental proof is available at no extra cost: `sa-agent-systems`
 attempting a Firestore write receives a real 403 because investigators hold
 `datastore.viewer` only.
 
-## Blocked
+## Actually provisioned (as of Gate B)
 
-The Google Cloud SDK is not installed on the build machine, so no account,
-role, or binding has been created and no proof has been captured.
+Only one identity exists so far.
+
+`sa-orchestrator@site-continuity-fleet.iam.gserviceaccount.com` — attached to
+the `scf-orchestrator` Cloud Run service, holding exactly three project roles:
+
+```
+roles/datastore.user      read/write incident state
+roles/aiplatform.user     invoke Gemini 3.7 Flash via Vertex AI
+roles/logging.logWriter   structured Cloud Logging
+```
+
+It deliberately holds **no** `run.invoker`, because there is nothing for it to
+invoke yet; no Owner or Editor; no `run.admin`; no IAM administration; and no
+remediation permission of any kind.
+
+No service-account key was created or downloaded. Cloud Run uses the attached
+identity, and local development uses Application Default Credentials.
+
+The remaining accounts in the table above are **not created yet**, and none of
+the three required IAM proofs has been captured. That work is Gate C.
