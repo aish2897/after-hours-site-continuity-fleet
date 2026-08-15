@@ -1,0 +1,17 @@
+[project]
+name = "site-continuity-fleet"
+version = "0.1.0"
+description = "Competition-grade multi-agent site continuity workflow for All Things Agentic."
+requires-python = ">=3.11"
+dependencies = []
+
+[project.optional-dependencies]
+adk = ["google-adk"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+

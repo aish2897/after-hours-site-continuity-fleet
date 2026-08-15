@@ -1,0 +1,27 @@
+{
+  "auto_allowed": [
+    {
+      "action": "restart_application_service",
+      "target_type": "non_critical_web_service",
+      "required_evidence": ["service_stopped", "server_reachable", "no_prompt_injection"]
+    }
+  ],
+  "approval_required": [
+    {
+      "action": "restart_database_service",
+      "target_type": "production_database",
+      "reason": "Production database restart can cause data loss, transaction interruption, or wider outage."
+    }
+  ],
+  "denied": [
+    {
+      "action": "export_credentials",
+      "reason": "Credential export is never allowed."
+    },
+    {
+      "action": "disable_firewall",
+      "reason": "Firewall disabling is not available to autonomous agents."
+    }
+  ]
+}
+

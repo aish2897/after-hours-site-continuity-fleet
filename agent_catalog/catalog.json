@@ -1,0 +1,60 @@
+{
+  "catalog_version": "0.1.0",
+  "agents": [
+    {
+      "name": "orchestrator",
+      "version": "0.1.0",
+      "capabilities": ["classify_incident", "route_workflow", "enforce_budgets"],
+      "allowed_tools": ["create_incident", "request_evidence", "request_policy_decision"]
+    },
+    {
+      "name": "context",
+      "version": "0.1.0",
+      "capabilities": ["site_profile", "change_context"],
+      "allowed_tools": ["read_site_profile", "read_change_log"]
+    },
+    {
+      "name": "network",
+      "version": "0.1.0",
+      "capabilities": ["connectivity_check", "dns_check", "firewall_event_read"],
+      "allowed_tools": ["read_network_status", "read_dns_status", "read_firewall_events"]
+    },
+    {
+      "name": "systems",
+      "version": "0.1.0",
+      "capabilities": ["service_health", "server_health", "propose_restart"],
+      "allowed_tools": ["read_server_status", "read_service_status"]
+    },
+    {
+      "name": "security",
+      "version": "0.1.0",
+      "capabilities": ["prompt_injection_detection", "suspicious_activity_review"],
+      "allowed_tools": ["scan_untrusted_text", "read_security_events"]
+    },
+    {
+      "name": "policy",
+      "version": "0.1.0",
+      "capabilities": ["risk_decision", "authorization"],
+      "allowed_tools": ["evaluate_policy"]
+    },
+    {
+      "name": "remediation",
+      "version": "0.1.0",
+      "capabilities": ["approved_service_restart"],
+      "allowed_tools": ["restart_application_service"]
+    },
+    {
+      "name": "verification",
+      "version": "0.1.0",
+      "capabilities": ["post_action_health_check"],
+      "allowed_tools": ["read_service_status", "read_http_health"]
+    },
+    {
+      "name": "audit",
+      "version": "0.1.0",
+      "capabilities": ["timeline", "evidence_package"],
+      "allowed_tools": ["append_audit_record"]
+    }
+  ]
+}
+
