@@ -17,34 +17,36 @@ Google service account whose IAM role is scoped to a single Cloud Run service.
 
 ## Integration status
 
-This table is the project's honesty mechanism. A row becomes `VERIFIED` only
-when a matching evidence artifact exists in `docs/evidence/`. Nothing in this
-repo, the demo video, or the Devpost entry may claim a capability whose row is
-not `VERIFIED`.
+This table is the project's honesty mechanism.
+
+| State | Meaning |
+|---|---|
+| `NOT INTEGRATED` | Not built. |
+| `IMPLEMENTED` | Code exists and local tests pass. Not yet exercised against real infrastructure. |
+| `VERIFIED` | Exercised for real, with a saved evidence artifact in `docs/evidence/`. |
+
+Nothing in this repo, the demo video, or the Devpost entry may claim a
+capability beyond the state recorded here.
 
 | Capability | Status | Evidence |
 |---|---|---|
-| Deterministic policy gate | **VERIFIED (local)** | `tests/policy/test_decision_matrix.py` — 26 |
-| Agent capability registry | **VERIFIED (local)** | `tests/policy/test_registry.py` — 9 |
-| Incident state machine | **VERIFIED (local)** | `tests/unit/test_state_machine.py` — 15 |
-| Deterministic idempotency keys | **VERIFIED (local)** | `tests/unit/test_ids.py` — 8 |
-| Hash-chained audit + tamper detection | **VERIFIED (local)** | `tests/unit/test_audit_chain.py` — 9 |
-| Evidence-dependent routing contract | **VERIFIED (local)** | `tests/unit/test_routing.py` — 7 |
-| Trusted/untrusted evidence separation | **VERIFIED (local)** | `tests/policy/test_decision_matrix.py` |
-| Gemini 3.7 Flash via Vertex AI | `NOT INTEGRATED` | Gate A pending |
-| Google ADK | `NOT INTEGRATED` | Gate A pending |
-| Cloud Run services | `NOT INTEGRATED` | Gate B pending |
-| Firestore durable state | `NOT INTEGRATED` | Gate B pending |
-| Real IAM permission boundaries | `NOT INTEGRATED` | Gate C pending |
-| Real remediation on a live service | `NOT INTEGRATED` | pending |
-| Cloud Logging / Trace correlation | `NOT INTEGRATED` | pending |
-| Model Armor | `NOT INTEGRATED` | pending |
+| Gemini 3.7 Flash via Vertex AI | **`VERIFIED`** | [`gate-a-vertex-gemini.md`](docs/evidence/gate-a-vertex-gemini.md) |
+| Deterministic policy gate | `IMPLEMENTED` | `tests/policy/test_decision_matrix.py` — 26 |
+| Agent capability registry | `IMPLEMENTED` | `tests/policy/test_registry.py` — 9 |
+| Incident state machine | `IMPLEMENTED` | `tests/unit/test_state_machine.py` — 15 |
+| Deterministic idempotency keys | `IMPLEMENTED` | `tests/unit/test_ids.py` — 8 |
+| Hash-chained audit + tamper detection | `IMPLEMENTED` | `tests/unit/test_audit_chain.py` — 9 |
+| Evidence-dependent routing contract | `IMPLEMENTED` | `tests/unit/test_routing.py` — 7 |
+| Trusted/untrusted evidence separation | `IMPLEMENTED` | `tests/policy/test_decision_matrix.py` |
+| Google ADK | `NOT INTEGRATED` | in progress |
+| Cloud Run services | `NOT INTEGRATED` | Gate B |
+| Firestore durable state | `NOT INTEGRATED` | Gate B |
+| Real IAM permission boundaries | `NOT INTEGRATED` | 3 proofs required |
+| Real remediation on a live service | `NOT INTEGRATED` | `dispatch-web` |
+| Cloud Logging / Trace correlation | `NOT INTEGRATED` | — |
+| Model Armor | `NOT INTEGRATED` | after first remediation path |
 | Resumable human approval | `NOT INTEGRATED` | out of slice 1 |
 | Web UI | `NOT INTEGRATED` | out of slice 1 |
-
-**No Google Cloud service is currently integrated.** The deterministic core is
-built and tested locally; cloud work is blocked on the Google Cloud SDK not
-being installed on the build machine.
 
 ## What exists today
 
@@ -55,17 +57,27 @@ being installed on the build machine.
 - `src/scf/audit/` — append-only hash chain with tamper detection.
 - `src/scf/config.py` — frozen region and model decisions.
 
-## Region decisions
+## Regions and data handling
 
-Core stack is single-region **Sydney (`australia-southeast1`)**: Cloud Run,
-Firestore, Vertex AI, Artifact Registry, Logging, Trace, Secret Manager.
+| Concern | Location |
+|---|---|
+| Cloud Run, Firestore, Artifact Registry | Sydney `australia-southeast1` |
+| Model Armor inspection | Melbourne `australia-southeast2` |
+| Gemini 3.7 Flash inference | `global` |
 
-Model Armor has no Sydney region, so security inspection crosses to
-**Melbourne (`australia-southeast2`)**. That hop is deliberate, stays inside
-Australia, and is documented in `ARCHITECTURE.md` rather than glossed over.
+Authoritative incident state, audit records, and privileged execution remain on
+Australian Google Cloud infrastructure.
 
-The global Gemini endpoint is **not** a silent fallback. If Sydney cannot serve
-the model, the build stops and the decision is escalated.
+Gemini 3.7 Flash publishes inference endpoints for `global`, `us`, and `eu`
+only — Sydney returns `404 NOT_FOUND` for this publisher model, confirmed by a
+real call ([evidence](docs/evidence/gate-a-vertex-gemini.md)). Gemini 3.5 Flash
+has no Sydney endpoint either. Model inference is therefore performed through
+Vertex AI's `global` endpoint as a deliberate, documented architecture choice.
+
+**Complete Australian data residency is not claimed.** The competition
+environment uses synthetic data only. Sensitive or policy-restricted content
+must never be silently sent to the global endpoint; an explicit classification
+and security boundary governs what crosses it.
 
 Pub/Sub is deliberately excluded. Replay and duplicate-delivery proof is done
 by repeated delivery against Firestore-backed deterministic idempotency.

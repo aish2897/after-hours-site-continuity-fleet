@@ -76,19 +76,40 @@ Investigators are stateless and never write Firestore. The orchestrator
 persists on their behalf. This is what turns `datastore.viewer` into a real
 boundary instead of a naming convention.
 
-## Regions
+## Regions and data handling
 
-Core stack is single-region **Sydney (`australia-southeast1`)**: Cloud Run,
-Firestore, Vertex AI, Artifact Registry, Logging, Trace, Secret Manager.
+| Concern | Location | Why |
+|---|---|---|
+| Cloud Run, Firestore, Artifact Registry | Sydney `australia-southeast1` | Authoritative state and privileged execution stay in Australia |
+| Model Armor inspection | Melbourne `australia-southeast2` | No Sydney region; nearest Australian region |
+| Gemini 3.7 Flash inference | `global` | No Australian inference endpoint published |
 
-Model Armor is not offered in Sydney. Google's Australian Model Armor region is
-**Melbourne (`australia-southeast2`)**, so security inspection makes a
-deliberate Sydney → Melbourne hop. The design is all-Australian; it is not
-single-region, and this document says so rather than implying otherwise.
+Model Armor is not offered in Sydney, so security inspection makes a deliberate
+Sydney → Melbourne hop. That leg is entirely within Australia.
 
-The global Gemini endpoint is **not** a silent fallback
-(`config.ALLOW_GLOBAL_ENDPOINT_FALLBACK = False`). If Sydney cannot serve the
-model, the build stops and the decision is escalated.
+Model inference is not. Gemini 3.7 Flash publishes inference endpoints for
+`global`, `us`, and `eu` only; a real call to the Sydney regional endpoint
+returned `404 NOT_FOUND` for the publisher model
+(`docs/evidence/gate-a-vertex-gemini.md`). Gemini 3.5 Flash has no Sydney
+endpoint either, so downgrading the model family does not avoid the constraint.
+
+Using the `global` endpoint is therefore an **intentional, approved
+architecture decision, not a fallback**. `config.MODEL_LOCATION = "global"`.
+
+### What this means for residency
+
+Authoritative incident state, audit records, and privileged execution remain on
+Australian Google Cloud infrastructure. Model inference does not.
+
+**Complete Australian data residency is not claimed anywhere in this project.**
+The competition environment uses synthetic data only.
+
+Because inference leaves the country, the classification and security boundary
+is load-bearing rather than decorative: untrusted incident content is inspected
+by Model Armor in Melbourne *before* it reaches an agent or a tool, and
+sensitive or policy-restricted content must never be silently forwarded to the
+global endpoint. That boundary is what makes the split defensible; without it,
+the design would simply be leaking.
 
 ## State
 

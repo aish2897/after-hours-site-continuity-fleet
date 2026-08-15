@@ -2,50 +2,69 @@ from __future__ import annotations
 
 from typing import Final
 
+PROJECT_ID: Final[str] = "site-continuity-fleet"
+
 # --- Locked region decisions -------------------------------------------------
-# Core stack is single-region Sydney. Model Armor has no Sydney region, so
-# security inspection crosses to Melbourne. That hop is deliberate, stays
-# inside Australia, and is documented in ARCHITECTURE.md rather than hidden.
+# Authoritative state, audit records, and privileged execution stay on
+# Australian infrastructure. Model inference does not, and cannot: see
+# MODEL_LOCATION below. ARCHITECTURE.md states this split plainly rather than
+# claiming complete Australian data residency.
 
 CORE_REGION: Final[str] = "australia-southeast1"  # Sydney
 MODEL_ARMOR_REGION: Final[str] = "australia-southeast2"  # Melbourne
 
-# Cloud Run, Firestore, Vertex AI, Artifact Registry, Logging, Trace,
-# Secret Manager all pin to CORE_REGION.
 CLOUD_RUN_REGION: Final[str] = CORE_REGION
 FIRESTORE_REGION: Final[str] = CORE_REGION
-VERTEX_REGION: Final[str] = CORE_REGION
 ARTIFACT_REGISTRY_REGION: Final[str] = CORE_REGION
 
-# The global Gemini endpoint is deliberately NOT a silent fallback. If the
-# Sydney regional endpoint cannot serve the model, execution must stop and the
-# architecture decision must be escalated.
-ALLOW_GLOBAL_ENDPOINT_FALLBACK: Final[bool] = False
+# --- Model inference location ------------------------------------------------
+# Gemini 3.7 Flash publishes inference endpoints for `global`, `us`, and `eu`
+# only. Sydney returns 404 NOT_FOUND for this publisher model; verified by a
+# real call on 2026-08-15 (docs/evidence/gate-a-vertex-gemini.md). Gemini 3.5
+# Flash has no Sydney endpoint either, so downgrading does not avoid this.
+#
+# `global` is therefore the deliberate, approved primary inference location,
+# not a fallback. Untrusted content must pass the classification and security
+# boundary before it is sent here.
 
-# --- Model -------------------------------------------------------------------
-# REQUESTED_MODEL_ID is what Gate A must verify. VERIFIED_MODEL_ID stays None
-# until a real generate_content call has returned from VERTEX_REGION. Nothing
-# in this repo, the README, the video, or the Devpost text may claim a model
-# version while VERIFIED_MODEL_ID is None.
-
+MODEL_LOCATION: Final[str] = "global"
 REQUESTED_MODEL_ID: Final[str] = "gemini-3.7-flash"
-VERIFIED_MODEL_ID: Final[str | None] = None
+VERIFIED_MODEL_ID: Final[str | None] = "gemini-3.7-flash"
+MODEL_VERIFIED_AT: Final[str] = "2026-08-15T14:40:48Z"
+
+# Regional endpoints are host-prefixed; the global endpoint is not.
+VERTEX_HOST: Final[str] = "aiplatform.googleapis.com"
+
+# gemini-3.7-flash is a thinking model. A short prompt spent 297 thought tokens
+# against 7 output tokens, so a small maxOutputTokens truncates the answer with
+# finishReason=MAX_TOKENS before any visible text is produced.
+DEFAULT_MAX_OUTPUT_TOKENS: Final[int] = 2048
 
 # --- Targets -----------------------------------------------------------------
 DISPATCH_WEB_SERVICE: Final[str] = "dispatch-web"
 UNRELATED_SERVICE: Final[str] = "site-directory"  # IAM proof C negative target
 
 # --- Deliberate exclusions ---------------------------------------------------
-# Pub/Sub is not used in the MVP. Replay/duplicate proof is performed by
-# repeated delivery against Firestore-backed deterministic idempotency.
+# Pub/Sub is not used in the MVP. Replay proof is performed by repeated
+# delivery against Firestore-backed deterministic idempotency.
 USE_PUBSUB: Final[bool] = False
 
 
-def model_id() -> str:
+def model_endpoint(model_id: str | None = None) -> str:
+    """Full Vertex generateContent URL for the approved inference location."""
+    model = model_id or model_verified_id()
+    return (
+        f"https://{VERTEX_HOST}/v1/projects/{PROJECT_ID}"
+        f"/locations/{MODEL_LOCATION}/publishers/google/models/{model}"
+        ":generateContent"
+    )
+
+
+def model_verified_id() -> str:
     """Return the model id only once it has been verified against Vertex."""
     if VERIFIED_MODEL_ID is None:
         raise RuntimeError(
-            "Gate A not passed: no Gemini model verified in "
-            f"{VERTEX_REGION}. Refusing to claim {REQUESTED_MODEL_ID!r}."
+            f"Gate A not passed: no Gemini model verified at {MODEL_LOCATION}. "
+            f"Refusing to claim {REQUESTED_MODEL_ID!r}."
         )
     return VERIFIED_MODEL_ID
