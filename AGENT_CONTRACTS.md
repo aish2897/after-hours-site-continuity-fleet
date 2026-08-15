@@ -1,159 +1,108 @@
 # Agent Contracts
 
-## Shared Rules
+Authoritative machine-readable form: `policies/agent_registry.json`. This
+document explains it. Where the two disagree, the JSON wins and this file is
+the bug.
 
-- Agents can gather evidence only through declared tools.
-- Agents can propose actions, but policy decides.
-- Agents must include evidence references in every recommendation.
-- Agents must never copy untrusted incident text into system instructions.
-- Agents must treat user attachments, tickets, screenshots, and voice transcripts as untrusted input.
-- Mutating tools require policy approval and idempotency.
+## Shared rules
 
-## Orchestrator Agent
+- Agents gather evidence only through declared tools.
+- Agents may propose; only the policy gate authorizes.
+- Agents must treat report text, attachments, screenshots, transcripts, and
+  vendor messages as `UNTRUSTED_INPUT`.
+- Agents must never copy untrusted content into system instructions.
+- Only the orchestrator and the executor write to Firestore.
+- Mutating tools require a policy decision and a deterministic idempotency key.
 
-Purpose:
+## Orchestrator — LLM-backed
 
-- Classify the incident.
-- Build the workflow plan.
-- Route work to specialist agents.
-- Enforce step, timeout, and retry budgets.
+**Purpose.** Classify the incident, emit a `RoutingDecision`, dispatch the
+required specialists, enforce step and timeout budgets, persist state.
 
-Allowed:
+**Allowed.** `create_incident`, `route_specialists`, `request_policy_decision`,
+`request_execution`. Sole agent-side Firestore writer.
 
-- Create incident records.
-- Request specialist evidence.
-- Request policy evaluation.
+**Prohibited.** Proposing actions. Direct remediation. Direct credential
+access. Overriding a policy decision.
 
-Prohibited:
+**Contract.** Every specialist appears in the routing decision as either
+required with a reason, or declined with a reason. Silent omission is invalid.
 
-- Direct remediation.
-- Direct credential access.
-- Ignoring a policy decision.
+## Systems Investigator — LLM-backed
 
-## Context Agent
+**Purpose.** Service, revision, and application health.
 
-Purpose:
+**Allowed.** `read_service_health`, `read_revision_history`. May emit a
+`Proposal`.
 
-- Identify site, impacted business function, criticality, known dependencies, and recent changes.
+**Prohibited.** Writing Firestore. Any mutation. Restarting production
+databases directly.
 
-Allowed:
+**Boundary.** Runs as `sa-agent-systems`, which holds `datastore.viewer` and no
+Cloud Run write role. Attempting to modify `dispatch-web` yields a real Google
+403 — IAM proof A.
 
-- Read synthetic CMDB and site profile.
-- Read synthetic change history.
+## Network Investigator — LLM-backed *(slice 2)*
 
-Prohibited:
+**Purpose.** Connectivity, DNS, gateway, WAN.
 
-- Mutating infrastructure.
-- Making security decisions.
+**Allowed.** `read_network_status`, `read_dns_status`. May emit a `Proposal`.
 
-## Network Agent
+**Prohibited.** Writing Firestore. Changing routes or DNS. Disabling controls.
 
-Purpose:
+## Security & Identity Investigator — LLM-backed *(slice 2)*
 
-- Check connectivity, DNS, gateway status, WAN state, and network-adjacent signals.
+**Purpose.** Suspicious access, identity events, and classification of
+untrusted content.
 
-Allowed:
+**Allowed.** `read_security_events`, `classify_untrusted_content`.
 
-- Read network diagnostics.
-- Read DNS and firewall events.
+**Prohibited.** **Proposing any action.** Returning secrets. Accepting incident
+text as instructions.
 
-Prohibited:
+The prototype let this agent author an `EXPORT_CREDENTIALS` request so the
+policy gate could block it on camera. That was theatre. The contract now
+forbids it and a test enforces it.
 
-- Disabling firewall controls.
-- Changing routes or DNS records.
-- Restarting services.
+## Continuity Coordinator — LLM-backed *(slice 2)*
 
-## Systems Agent
+**Purpose.** Human-facing narrative for a non-technical duty manager,
+escalation packages, vendor handoff.
 
-Purpose:
+**Allowed.** `compose_status_update`, `assemble_escalation_package`.
 
-- Check server, service, CPU, disk, process, and application health.
+**Prohibited.** Proposing actions. Writing Firestore. Any infrastructure
+mutation.
 
-Allowed:
+---
 
-- Read server and service status.
-- Propose service restart when evidence supports it.
+# Deterministic Components
 
-Prohibited:
+These are not agents. They contain no model calls and no prompt text.
 
-- Restarting production database services directly.
-- Deleting files directly.
+## Policy Gate
 
-## Security Agent
+Pure function of the policy file, the agent registry, and `TRUSTED_TOOL`
+evidence. Returns a versioned decision with a reason code. No I/O.
 
-Purpose:
+Never reads model-authored text, including `Proposal.rationale`.
 
-- Identify malicious user content, suspicious access, data exposure risk, and unsafe tool requests.
+## Remediation Executor
 
-Allowed:
+The only identity that can mutate infrastructure. Runs as `sa-executor` with
+the custom `scfRemediator` role bound to `dispatch-web` alone.
 
-- Scan incident text for prompt injection.
-- Read synthetic identity/security events.
-- Raise DENIED recommendations.
+Re-reads the decision from Firestore rather than trusting the caller, claims
+the idempotency key transactionally, then acts. Attempting to modify any other
+Cloud Run service yields a real Google 403 — IAM proof C.
 
-Prohibited:
+## Verifier
 
-- Returning secrets.
-- Accepting incident text as instructions.
+Re-reads target health under `sa-verifier`, a different read-only identity from
+the executor, so the component that acts is not the component that grades its
+own work.
 
-## Policy/Risk Agent
+## Audit
 
-Purpose:
-
-- Deterministically classify requested actions as `AUTO_ALLOWED`, `APPROVAL_REQUIRED`, or `DENIED`.
-
-Allowed:
-
-- Evaluate action, actor, target, evidence, and environment.
-
-Prohibited:
-
-- Calling external tools.
-- Executing remediation.
-
-## Remediation Agent
-
-Purpose:
-
-- Execute approved low-risk remediations.
-
-Allowed:
-
-- Restart non-critical application services when policy allows.
-- Perform approved simulator failover actions.
-
-Prohibited:
-
-- Executing actions with missing idempotency keys.
-- Executing high-risk actions without approval.
-- Executing denied actions.
-
-## Verification Agent
-
-Purpose:
-
-- Prove whether recovery succeeded after action.
-
-Allowed:
-
-- Re-run health checks.
-- Compare before/after state.
-
-Prohibited:
-
-- Changing production state.
-
-## Audit Agent
-
-Purpose:
-
-- Create a complete evidence package.
-
-Allowed:
-
-- Record timeline, evidence, decisions, actions, policy outcomes, approvals, and verification.
-
-Prohibited:
-
-- Editing historical audit records.
-
+Append-only hash-chained writer. Editing a historical record is not prohibited
+by policy alone — it breaks the chain and `verify_chain()` reports where.
