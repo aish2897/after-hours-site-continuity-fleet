@@ -1,0 +1,9 @@
+# Cloud Run buildpack dependency set.
+# "." installs the scf package from pyproject.toml so `scf.app.main` imports.
+.
+fastapi>=0.115
+uvicorn[standard]>=0.30
+google-adk>=2.7
+google-genai>=2.18
+google-cloud-firestore>=2.19
+pydantic>=2.9
