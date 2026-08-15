@@ -2,19 +2,36 @@ from __future__ import annotations
 
 from typing import Any
 
+from google.api_core.exceptions import AlreadyExists
 from google.cloud import firestore
 
 from scf import config
 from scf.audit.chain import append as append_audit_record
-from scf.domain.enums import IncidentStatus
-from scf.domain.models import AuditRecord, IncidentDoc, RoutingDecision
+from scf.domain.enums import IncidentStatus, TrustLevel
+from scf.domain.models import (
+    ActionRecord,
+    AuditRecord,
+    Evidence,
+    IncidentDoc,
+    PolicyDecision,
+    Proposal,
+    RoutingDecision,
+)
 from scf.domain.state_machine import assert_transition
 
 INCIDENTS = "incidents"
 AUDIT = "audit"
+DECISIONS = "decisions"
+ACTIONS = "actions"
+EVIDENCE = "evidence"
+IDEMPOTENCY = "idempotency"
 
 
 class IncidentNotFound(KeyError):
+    pass
+
+
+class DecisionNotFound(KeyError):
     pass
 
 
@@ -116,6 +133,141 @@ class IncidentRepository:
             trace_id=trace_id,
         )
         return previous
+
+    def save_evidence(
+        self,
+        incident_id: str,
+        evidence: list[Evidence],
+        *,
+        trace_id: str | None = None,
+    ) -> int:
+        collection = self._doc_ref(incident_id).collection(EVIDENCE)
+        for item in evidence:
+            payload = item.model_dump(mode="json")
+            payload["content_hash"] = item.content_hash()
+            collection.document(f"{item.source_agent}-{item.key}").set(payload)
+        self.append_audit(
+            incident_id,
+            actor="orchestrator",
+            event="evidence_collected",
+            payload={
+                "count": len(evidence),
+                "trusted": sum(
+                    1 for e in evidence if e.trust_level is TrustLevel.TRUSTED_TOOL
+                ),
+            },
+            trace_id=trace_id,
+        )
+        return len(evidence)
+
+    # --- decisions, idempotency, actions (Gate D) --------------------------
+
+    def save_decision(
+        self,
+        incident_id: str,
+        proposal: Proposal,
+        decision: PolicyDecision,
+        *,
+        parameters: dict[str, Any] | None = None,
+        trace_id: str | None = None,
+    ) -> str:
+        """Persist the authoritative authorization record.
+
+        The executor re-reads this document rather than trusting its caller.
+        The model's rationale is stored for display only and is not part of
+        the authorization inputs.
+        """
+        payload = {
+            "decision_id": decision.decision_id,
+            "incident_id": incident_id,
+            "action_type": proposal.action_type.value,
+            "target_ref": proposal.target_ref,
+            "decision": decision.decision.value,
+            "reason_code": decision.reason_code,
+            "reason": decision.reason,
+            "evidence_snapshot_hash": decision.evidence_snapshot_hash,
+            "policy_version": decision.policy_version,
+            "required_approval_role": decision.required_approval_role,
+            "evaluated_at": decision.evaluated_at.isoformat(),
+            "proposed_by": proposal.proposed_by,
+            "model_rationale_display_only": proposal.rationale,
+            # Authorized mutation parameters, derived from TRUSTED_TOOL
+            # evidence at decision time. The executor reads these rather than
+            # accepting them from its caller.
+            "parameters": parameters or {},
+            "revoked": False,
+        }
+        (
+            self._doc_ref(incident_id)
+            .collection(DECISIONS)
+            .document(decision.decision_id)
+            .create(payload)
+        )
+        self.append_audit(
+            incident_id,
+            actor="policy",
+            event="policy_decision",
+            payload={
+                "decision_id": decision.decision_id,
+                "decision": decision.decision.value,
+                "reason_code": decision.reason_code,
+                "policy_version": decision.policy_version,
+            },
+            trace_id=trace_id,
+        )
+        return decision.decision_id
+
+    def get_decision(self, incident_id: str, decision_id: str) -> dict[str, Any]:
+        snapshot = (
+            self._doc_ref(incident_id)
+            .collection(DECISIONS)
+            .document(decision_id)
+            .get()
+        )
+        if not snapshot.exists:
+            raise DecisionNotFound(f"{incident_id}/{decision_id}")
+        return snapshot.to_dict()
+
+    def claim_idempotency(
+        self,
+        key: str,
+        *,
+        incident_id: str,
+        decision_id: str,
+        action_id: str,
+    ) -> bool:
+        """Atomically claim the right to execute exactly once.
+
+        Firestore `create` fails if the document already exists. That failure
+        IS the duplicate signal — there is no read-then-write race, no
+        in-memory set, and no process-local lock.
+        """
+        try:
+            self._db.collection(IDEMPOTENCY).document(key).create(
+                {
+                    "incident_id": incident_id,
+                    "decision_id": decision_id,
+                    "action_id": action_id,
+                    "claimed_at": firestore.SERVER_TIMESTAMP,
+                }
+            )
+            return True
+        except AlreadyExists:
+            return False
+
+    def record_action(self, incident_id: str, action: ActionRecord) -> None:
+        (
+            self._doc_ref(incident_id)
+            .collection(ACTIONS)
+            .document(action.action_id)
+            .set(action.model_dump(mode="json"))
+        )
+
+    def actions(self, incident_id: str) -> list[dict[str, Any]]:
+        return [
+            doc.to_dict()
+            for doc in self._doc_ref(incident_id).collection(ACTIONS).stream()
+        ]
 
     def save_routing(
         self,

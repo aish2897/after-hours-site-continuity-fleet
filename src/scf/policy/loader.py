@@ -9,9 +9,12 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from scf.domain.enums import ActionType, Decision
 
-REPO_ROOT = Path(__file__).resolve().parents[3]
-POLICY_PATH = REPO_ROOT / "policies" / "action_policy.json"
-REGISTRY_PATH = REPO_ROOT / "policies" / "agent_registry.json"
+# Shipped as package data (see pyproject [tool.setuptools.package-data]) so the
+# policy travels with the code. Resolving relative to a repo root works in a
+# source checkout and fails inside site-packages on Cloud Run.
+POLICY_DIR = Path(__file__).resolve().parents[1] / "policies"
+POLICY_PATH = POLICY_DIR / "action_policy.json"
+REGISTRY_PATH = POLICY_DIR / "agent_registry.json"
 
 WILDCARD = "*"
 

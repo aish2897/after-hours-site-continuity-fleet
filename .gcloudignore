@@ -1,16 +1,25 @@
-.git/
-.gitignore
-.venv/
+# Patterns are anchored with a leading slash so they match only at the repo
+# root. An unanchored "tools/" also matches src/scf/tools/, which silently
+# shipped a package without it and failed at import on Cloud Run.
+/.git/
+/.gitignore
+/.venv/
 __pycache__/
 *.py[cod]
-.pytest_cache/
-.mypy_cache/
-.ruff_cache/
-.coverage
-htmlcov/
-docs/
-tests/
-tools/
-infra/
-deployment/
-*.md
+/.pytest_cache/
+/.mypy_cache/
+/.ruff_cache/
+/.coverage
+/htmlcov/
+/docs/
+/tests/
+/tools/
+/infra/
+/deployment/
+/services/
+/STATUS.md
+/README.md
+/ARCHITECTURE.md
+/SECURITY.md
+/COMPETITION.md
+/AGENT_CONTRACTS.md
