@@ -71,12 +71,35 @@ Stated plainly rather than implied away.
    reordering, deletion in the middle, and forged appends, but a reader must
    also check the expected record count to detect a truncated tail. Covered by
    `test_truncating_the_tail_is_detected_by_length`.
-3. **Model Armor inspection crosses regions.** Sydney to Melbourne. Both
-   Australian; see `ARCHITECTURE.md`.
+3. **Model inference leaves Australia.** Gemini 3.7 Flash is not available
+   through an Australian regional inference endpoint — Sydney returns
+   `404 NOT_FOUND` for the publisher model, confirmed by a real call
+   (`docs/evidence/gate-a-vertex-gemini.md`). Inference therefore uses Vertex
+   AI's `global` endpoint. Model Armor inspection additionally crosses from
+   Sydney to Melbourne, though that leg stays within Australia. See the data
+   handling section below.
 4. **No capability is claimed before its evidence exists.** Every Google Cloud
    row in the README integration table currently reads `NOT INTEGRATED`.
 
-## Data handling
+## Data handling and processing location
+
+Authoritative operational state, audit records, and privileged execution remain
+on Australian Google Cloud infrastructure. Gemini 3.7 Flash inference uses
+Vertex AI's global endpoint because the model is not available through an
+Australian regional inference endpoint. **Complete Australian model-processing
+residency is therefore not claimed.**
+
+| Concern | Location |
+|---|---|
+| Cloud Run, Firestore, Artifact Registry | Sydney `australia-southeast1` |
+| Model Armor inspection | Melbourne `australia-southeast2` |
+| Gemini 3.7 Flash inference | `global` |
+
+Because inference leaves the country, the classification and security boundary
+is load-bearing rather than decorative. Untrusted incident content is inspected
+by Model Armor before it reaches an agent or a tool, and sensitive or
+policy-restricted content must never be silently forwarded to the global
+endpoint.
 
 Synthetic company, sites, users, services, and logs only. No employer data,
 code, names, policies, addresses, configurations, or IP. Personal Google Cloud

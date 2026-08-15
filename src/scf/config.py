@@ -5,10 +5,10 @@ from typing import Final
 PROJECT_ID: Final[str] = "site-continuity-fleet"
 
 # --- Locked region decisions -------------------------------------------------
-# Authoritative state, audit records, and privileged execution stay on
-# Australian infrastructure. Model inference does not, and cannot: see
-# MODEL_LOCATION below. ARCHITECTURE.md states this split plainly rather than
-# claiming complete Australian data residency.
+# Authoritative operational state, audit records, and privileged execution stay
+# on Australian infrastructure. Model inference does not, and cannot: see
+# MODEL_LOCATION below. Complete Australian model-processing residency is
+# therefore not claimed. ARCHITECTURE.md states the split in full.
 
 CORE_REGION: Final[str] = "australia-southeast1"  # Sydney
 MODEL_ARMOR_REGION: Final[str] = "australia-southeast2"  # Melbourne

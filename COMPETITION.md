@@ -2,8 +2,8 @@
 
 Source documents reviewed:
 
-- Local PDF export: `C:\Users\Arslan\Downloads\AI Competitions for Prizes.pdf`
-- Local DOCX resource pack: `D:\Agentic\resources\HACKATHON - FULL.docx`
+- Local PDF export of the competition prize listing (not redistributed here).
+- Local DOCX resource pack supplied with the hackathon (not redistributed here).
 - Official Devpost rules, overview, FAQ, resources, and current Google documentation checked on 2026-08-15.
 
 ## Hard Requirements
@@ -64,7 +64,15 @@ Maximum final score: 6.0.
 
 We are not building another generic IT incident-response copilot. The stronger project is:
 
-> A secure autonomous multi-agent Site Continuity Fleet that lets non-technical frontline supervisors resolve and coordinate complex enterprise outages using multimodal incident reporting, while enforcing identity, policy, human approval, data sovereignty, and complete auditability.
+> A secure autonomous multi-agent Site Continuity Fleet that lets non-technical frontline duty managers resolve and coordinate complex enterprise outages, while enforcing scoped identity, deterministic policy, human approval, and complete auditability.
+
+Note on wording: this positioning deliberately does **not** claim data
+sovereignty. Authoritative operational state, audit records, and privileged
+execution remain on Australian Google Cloud infrastructure, but Gemini 3.7
+Flash inference uses Vertex AI's global endpoint because the model is not
+available through an Australian regional inference endpoint. See
+`ARCHITECTURE.md`. Multimodal intake is also not claimed; it is out of scope
+until the first vertical slice is verified.
 
 Why this is stronger:
 

@@ -1,63 +1,65 @@
 # Four-Minute Demo Spine
 
-## 0:00-0:25 - Problem
+**Status: planning document.** The moments below are the intended shape of the
+final video. Only the parts backed by rows marked `VERIFIED` in the README
+integration table exist today. Nothing here may be filmed as working before its
+evidence artifact exists.
 
-"A non-technical site supervisor has an outage after hours. They should not need to diagnose whether it is network, systems, identity, security, vendor, or facilities. The fleet takes one messy report and coordinates specialist agents safely."
+The earlier version of this file referenced prototype CLI commands
+(`web_down`, `db_restart`, `prompt_injection`, `permission_denied`). Those were
+removed with the prototype and are not coming back.
 
-Show: supervisor incident intake.
+## 0:00–0:25 — Problem
 
-## 0:25-1:25 - Autonomous Resolution
+A non-technical duty manager at a distributed site has an outage after hours.
+They should not have to work out whether it is network, systems, identity,
+security, or a vendor.
 
-Run `web_down`.
+Show: the report as they would actually type it — lowercase, no service names,
+no error codes.
 
-Show:
+## 0:25–1:10 — Evidence-dependent delegation *(available now)*
 
-- Orchestrator routes to context, network, systems, and security agents.
-- Systems evidence identifies stopped service.
-- Policy classifies service restart as `AUTO_ALLOWED`.
-- Remediation changes service state.
-- Verification proves HTTP is healthy.
-- Audit timeline records every step.
+Show the orchestrator running on Google ADK against Gemini 3.7 Flash, emitting
+a typed routing decision.
 
-## 1:25-2:10 - Governance
+The point to land: **one** of four specialists is invoked, and the declines are
+reasoned. The model rules out network because the report says phones and wifi
+are fine. This is delegation, not fan-out.
 
-Run `db_restart`.
+## 1:10–2:00 — Governed remediation *(pending Gate B + dispatch-web)*
 
-Show:
+- Systems Investigator gathers trusted evidence from a real Cloud Run service.
+- It proposes a remediation from a closed enum.
+- The deterministic policy gate authorizes from trusted evidence only.
+- The scoped executor performs a real Cloud Run traffic flip.
+- `dispatch-web` genuinely goes 503 → 200.
+- Verification runs under a different, read-only identity.
 
-- Evidence points to database restart.
-- Policy classifies it as `APPROVAL_REQUIRED`.
-- Workflow pauses instead of acting.
-- This is enterprise control, not a reckless bot.
+## 2:00–2:45 — The boundary is Google's, not ours *(pending IAM proofs)*
 
-## 2:10-2:55 - Attack Resistance
+Three real, Google-generated results:
 
-Run `prompt_injection`.
+- **A.** Systems Investigator attempts the mutation → real `403 PERMISSION_DENIED`.
+- **B.** Remediation Executor performs the authorized mutation → succeeds.
+- **C.** Remediation Executor attempts the same mutation on an unrelated
+  service → real `403 PERMISSION_DENIED`.
 
-Show:
+C is the one that matters: the boundary is scoped to a resource, not merely to
+an identity.
 
-- Incident contains malicious instructions.
-- Security agent flags prompt injection.
-- Policy denies unsafe action path.
-- Audit records the block.
+## 2:45–3:20 — Replay and audit *(pending Firestore)*
 
-## 2:55-3:30 - Least Privilege
+Deliver the same execution request three times. Show exactly one mutation and
+two duplicate suppressions in persisted action and audit state. Then show the
+hash-chained audit trail failing verification after a single record is edited.
 
-Run `permission_denied`.
+## 3:20–4:00 — Google Cloud proof
 
-Show:
+Cloud Run services and revisions, Firestore incident documents, one correlated
+Cloud Trace spanning the whole flow, repository, and architecture diagram.
 
-- Network agent tries a write-level firewall action.
-- Authorization returns `PERMISSION_DENIED`.
-- Only correctly scoped agents can mutate state.
-
-## 3:30-4:00 - Google Cloud Proof
-
-Final version must show:
-
-- Cloud Run or Agent Runtime dashboard.
-- Vertex AI or Gemini logs.
-- Firestore incident/audit state.
-- Pub/Sub events if used.
-- Repo and architecture diagram.
-
+Close on the honest residency line: authoritative state, audit records, and
+privileged execution stay on Australian infrastructure; model inference uses
+the global endpoint because Gemini 3.7 Flash has no Australian regional
+inference endpoint.

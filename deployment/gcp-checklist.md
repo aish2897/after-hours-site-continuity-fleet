@@ -1,32 +1,53 @@
 # Google Cloud Checklist
 
-Use a dedicated personal competition project.
+Dedicated personal competition project. Frozen decisions, not open options.
 
-## Project Setup
+## Locations (decided, not to be re-litigated)
 
-- Create new project.
-- Enable billing with budget alerts.
-- Set default region deliberately. Melbourne `australia-southeast2` is attractive for data-sovereignty story, but confirm all selected Agent Platform features are supported.
-- Enable required APIs only as needed.
+| Concern | Location | Status |
+|---|---|---|
+| Cloud Run | `australia-southeast1` Sydney | pending |
+| Firestore | `australia-southeast1` Sydney | pending |
+| Artifact Registry | `australia-southeast1` Sydney | pending |
+| Model Armor | `australia-southeast2` Melbourne | pending |
+| Gemini 3.7 Flash inference | `global` | **done** |
 
-## Likely APIs
+Gemini 3.7 Flash is not available through an Australian regional inference
+endpoint; Sydney returns `404 NOT_FOUND` for the publisher model. Using the
+global endpoint is a deliberate architecture decision, not a fallback, and
+complete Australian model-processing residency is not claimed. Evidence:
+`docs/evidence/gate-a-vertex-gemini.md`.
 
-- Vertex AI API or Gemini API path.
-- Cloud Run Admin API.
-- Firestore API.
-- Pub/Sub API.
-- Cloud Logging API.
-- Cloud Trace API.
-- Secret Manager API.
-- Model Armor API if used.
-- Agent Platform APIs if used.
+## Project setup
 
-## Cost Controls
+- [x] Project created: `site-continuity-fleet`
+- [x] Billing enabled
+- [ ] Budget alerts at $20 / $50 / $100 of the $150 credit
+- [x] Application Default Credentials configured (`authorized_user`)
 
-- Cloud Run min instances: 0.
-- Low max instances during build.
-- Firestore small data footprint.
-- Use Gemini Flash first.
-- Avoid always-on databases.
-- Record cloud proof in demo before turning services down.
+Use ADC or workload identity throughout. **Do not create or download
+service-account key JSON files.**
 
+## APIs
+
+Enable only what the current gate needs.
+
+- [x] `aiplatform.googleapis.com` — Gate A
+- [ ] `run.googleapis.com` — Gate B
+- [ ] `firestore.googleapis.com` — Gate B
+- [ ] `cloudbuild.googleapis.com` — Gate B, source deploys
+- [ ] `artifactregistry.googleapis.com` — Gate B
+- [ ] `secretmanager.googleapis.com` — approval signing key, slice 2
+- [ ] `modelarmor.googleapis.com` — after the first remediation path
+- [x] `logging.googleapis.com`, `cloudtrace.googleapis.com` — already enabled
+
+Deliberately not used: Pub/Sub, GKE, Cloud SQL.
+
+## Cost controls
+
+- Cloud Run `min-instances=0`, low `max-instances` during build.
+- Gemini 3.7 Flash is a thinking model: thought tokens are charged against
+  `maxOutputTokens`. Budget accordingly and keep prompts short.
+- Live tests are opt-in behind `SCF_LIVE=1` so routine test runs cost nothing.
+- Small Firestore footprint; no always-on databases.
+- Capture demo evidence before scaling anything down.

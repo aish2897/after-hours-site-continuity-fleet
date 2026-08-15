@@ -31,6 +31,11 @@ executor is allowed to remediate *one specific service*".
 
 All accounts additionally hold `logging.logWriter` and `cloudtrace.agent`.
 
+`aiplatform.user` grants access to Vertex AI. Inference itself is served from
+the `global` endpoint, not an Australian region — Gemini 3.7 Flash has no
+Australian regional inference endpoint. The service accounts and every other
+resource in this matrix are Sydney `australia-southeast1`.
+
 The verifier deliberately runs under a different, read-only identity than the
 executor, so the component that acts is not the component that grades itself.
 

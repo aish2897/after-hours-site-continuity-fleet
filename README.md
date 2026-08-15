@@ -28,11 +28,16 @@ This table is the project's honesty mechanism.
 Nothing in this repo, the demo video, or the Devpost entry may claim a
 capability beyond the state recorded here.
 
+**"(dev runtime)" means the capability was exercised for real against Google
+Cloud from the local development machine, not from a deployed Cloud Run
+service.** No backend is deployed yet. Those rows become plain `VERIFIED` only
+once the same capability is proven running on Cloud Run.
+
 | Capability | Status | Evidence |
 |---|---|---|
-| Gemini 3.7 Flash via Vertex AI | **`VERIFIED`** | [`gate-a-vertex-gemini.md`](docs/evidence/gate-a-vertex-gemini.md) |
-| Google ADK agent, typed output | **`VERIFIED`** | [`gate-a-adk-routing.md`](docs/evidence/gate-a-adk-routing.md) |
-| Evidence-dependent specialist routing | **`VERIFIED`** | [`gate-a-adk-routing.md`](docs/evidence/gate-a-adk-routing.md) |
+| Gemini 3.7 Flash via Vertex AI | **`VERIFIED`** (dev runtime) | [`gate-a-vertex-gemini.md`](docs/evidence/gate-a-vertex-gemini.md) |
+| Google ADK agent, typed output | **`VERIFIED`** (dev runtime) | [`gate-a-adk-routing.md`](docs/evidence/gate-a-adk-routing.md) |
+| Evidence-dependent specialist routing | **`VERIFIED`** (dev runtime) | [`gate-a-adk-routing.md`](docs/evidence/gate-a-adk-routing.md) |
 | Deterministic policy gate | `IMPLEMENTED` | `tests/policy/test_decision_matrix.py` — 26 |
 | Agent capability registry | `IMPLEMENTED` | `tests/policy/test_registry.py` — 9 |
 | Incident state machine | `IMPLEMENTED` | `tests/unit/test_state_machine.py` — 15 |
@@ -88,10 +93,18 @@ Requires **Python 3.13+**. `StrEnum` means 3.10 will not work, and on some
 machines `python` on PATH is older than `py -3.13`.
 
 ```powershell
-cd D:\Agentic\site-continuity-fleet
+git clone https://github.com/aish2897/after-hours-site-continuity-fleet.git
+cd after-hours-site-continuity-fleet
 py -3.13 -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -e ".[dev]"
+.\.venv\Scripts\python.exe -m pip install -e ".[dev,adk]"
 .\.venv\Scripts\python.exe -m pytest
+```
+
+Live tests that call Vertex AI are skipped by default. They need Application
+Default Credentials (`gcloud auth application-default login`) and cost tokens:
+
+```powershell
+$env:SCF_LIVE=1; .\.venv\Scripts\python.exe -m pytest tests/e2e
 ```
 
 ## Non-negotiables
