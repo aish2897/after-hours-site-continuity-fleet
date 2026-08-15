@@ -58,9 +58,52 @@ A fourth, incidental proof is available at no extra cost: `sa-agent-systems`
 attempting a Firestore write receives a real 403 because investigators hold
 `datastore.viewer` only.
 
-## Actually provisioned (as of Gate B)
+## Actually provisioned (as of Gate C)
 
-Only one identity exists so far.
+Four identities exist. **Neither `sa-executor` nor `sa-agent-systems` holds any
+project-level role.** All of their authority is bound at individual resources.
+
+| Identity | Binding | Bound at |
+|---|---|---|
+| `sa-orchestrator` | `datastore.user`, `aiplatform.user`, `logging.logWriter` | project |
+| `sa-agent-systems` | `roles/run.viewer` | `dispatch-web` service |
+| `sa-executor` | `scfRemediator` (custom) | `dispatch-web` service |
+| `sa-executor` | `scfArtifactReader` (custom) | `cloud-run-source-deploy` repository |
+| `sa-executor` | `roles/iam.serviceAccountUser` | `sa-dispatch-web` account |
+| `sa-dispatch-web` | *(none)* | — |
+
+`scfRemediator` = `run.services.get`, `run.services.update`,
+`run.operations.get`. `run.revisions.get` and `run.revisions.list` were tested
+and proved unnecessary.
+
+`scfArtifactReader` = `artifactregistry.repositories.downloadArtifacts`, needed
+because Cloud Run validates the revision's image reference during a traffic
+update.
+
+### Why `sa-dispatch-web` exists
+
+Cloud Run requires `iam.serviceAccounts.actAs` over the target service's
+runtime identity. By default that identity is the project's default compute
+service account, which holds **`roles/editor`**. Granting the executor actAs
+over it would have allowed deploying a revision that runs as an
+Editor-privileged identity — a project-wide escalation.
+
+`dispatch-web` therefore runs as `sa-dispatch-web`, which holds no project
+roles, and the executor's actAs is scoped to that one account resource.
+
+### Proofs captured
+
+| # | Actor | Attempt | Result |
+|---|---|---|---|
+| **A** | `sa-agent-systems` | update traffic on `dispatch-web` | real 403 `run.services.update` denied |
+| **B** | `sa-executor` | update traffic on `dispatch-web` | success, 503 → 200 |
+| **C** | `sa-executor` | update traffic on `site-directory` | real 403 `run.services.get` denied |
+
+Full transcripts: `docs/evidence/gate-c-iam-boundary.md`.
+
+## Earlier note (Gate B)
+
+Only one identity existed at that point.
 
 `sa-orchestrator@site-continuity-fleet.iam.gserviceaccount.com` — attached to
 the `scf-orchestrator` Cloud Run service, holding exactly three project roles:

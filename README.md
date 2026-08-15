@@ -36,23 +36,33 @@ capability beyond the state recorded here.
 | Cloud Run service (Sydney, authenticated) | **`VERIFIED`** | [`gate-b`](docs/evidence/gate-b-cloud-run-firestore.md) |
 | Firestore durable incident state (Sydney) | **`VERIFIED`** | [`gate-b`](docs/evidence/gate-b-cloud-run-firestore.md) |
 | Structured Cloud Logging correlation | **`VERIFIED`** | [`gate-b`](docs/evidence/gate-b-cloud-run-firestore.md) |
+| Real Cloud Run target, healthy + broken revisions | **`VERIFIED`** | [`gate-c`](docs/evidence/gate-c-iam-boundary.md) |
+| Real IAM investigator denial (403) | **`VERIFIED`** | [`gate-c`](docs/evidence/gate-c-iam-boundary.md) |
+| Scoped executor mutation (resource-bound) | **`VERIFIED`** | [`gate-c`](docs/evidence/gate-c-iam-boundary.md) |
+| Executor blast-radius denial (403) | **`VERIFIED`** | [`gate-c`](docs/evidence/gate-c-iam-boundary.md) |
+| Real 503 → 200 infrastructure recovery | **`VERIFIED`** | [`gate-c`](docs/evidence/gate-c-iam-boundary.md) |
 | Deterministic policy gate | `IMPLEMENTED` | `tests/policy/test_decision_matrix.py` — 26 |
 | Agent capability registry | `IMPLEMENTED` | `tests/policy/test_registry.py` — 9 |
 | Incident state machine | `IMPLEMENTED` | `tests/unit/test_state_machine.py` — 15 |
 | Deterministic idempotency keys | `IMPLEMENTED` | `tests/unit/test_ids.py` — 8 |
 | Hash-chained audit + tamper detection | `IMPLEMENTED` | `tests/unit/test_audit_chain.py` — 9 |
 | Trusted/untrusted evidence separation | `IMPLEMENTED` | `tests/policy/test_decision_matrix.py` |
+| Full autonomous remediation slice | `NOT INTEGRATED` | next hard gate |
+| Idempotent execution enforced live | `NOT INTEGRATED` | derivation implemented only |
 | Cloud Trace end-to-end spans | `NOT INTEGRATED` | logging correlation only so far |
-| Real IAM permission boundaries | `NOT INTEGRATED` | 3 proofs required |
-| Real remediation on a live service | `NOT INTEGRATED` | `dispatch-web` |
-| Model Armor | `NOT INTEGRATED` | after first remediation path |
+| Model Armor | `NOT INTEGRATED` | Melbourne, after autonomous slice |
 | Resumable / crash-resumable workflow | `NOT INTEGRATED` | durable persistence only |
 | Resumable human approval | `NOT INTEGRATED` | out of slice 1 |
-| Web UI | `NOT INTEGRATED` | out of slice 1 |
+| Additional fleet investigators | `NOT INTEGRATED` | systems only so far |
+| Duty-manager UI | `NOT INTEGRATED` | out of slice 1 |
 
-Gate B proved durable persistence, not resumability: incident state survives
-container replacement, but no interrupted workflow resumes yet. Cloud Logging
-entries share a trace id; **no span has been exported to Cloud Trace**.
+Scope of what Gate C proved: **execution capability and scoped identity**, not
+autonomy. The traffic migration was invoked directly as a boundary test; the
+agent workflow does not yet drive it end to end. Gate B proved durable
+persistence, not resumability. Cloud Logging entries share a trace id, but
+**no span has been exported to Cloud Trace**.
+
+See [`STATUS.md`](STATUS.md) for the current phase and next gate.
 
 ## What exists today
 
