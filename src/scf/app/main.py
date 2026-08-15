@@ -9,11 +9,17 @@ from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel, ConfigDict, Field
 
 from scf import config
-from scf.domain.enums import IncidentStatus, TrustLevel
+from scf.app.invoke import call_service
+from scf.domain.enums import Decision, IncidentStatus, SpecialistName, TrustLevel
 from scf.domain.ids import new_incident_id
-from scf.domain.models import Evidence, IncidentDoc, IncidentReport
+from scf.domain.models import Evidence, IncidentDoc, IncidentReport, Proposal
 from scf.obs import log_event, trace_id_from_header
+from scf.policy import evaluate, trusted_evidence_map
 from scf.state import IncidentNotFound, IncidentRepository
+
+INVESTIGATOR_URL = os.environ.get("SCF_INVESTIGATOR_URL", "")
+EXECUTOR_URL = os.environ.get("SCF_EXECUTOR_URL", "")
+VERIFIER_URL = os.environ.get("SCF_VERIFIER_URL", "")
 
 app = FastAPI(
     title="After-Hours Site Continuity Fleet — Orchestrator",
@@ -53,6 +59,7 @@ class IncidentCreated(BaseModel):
     summary: str
     required_specialists: list[str]
     routes: list[RouteOut]
+    remediation: dict[str, Any] = {}
     trace_id: str | None = None
 
 
@@ -146,24 +153,176 @@ async def create_incident(
     await run_in_threadpool(
         repo.transition, incident_id, IncidentStatus.INVESTIGATING, trace_id=trace_id
     )
-    log_event(
-        "state_persisted",
-        trace_id=trace_id,
-        incident_id=incident_id,
-        status=IncidentStatus.INVESTIGATING.value,
-    )
+
+    remediation: dict[str, Any] = {"attempted": False, "reason": "systems_not_routed"}
+    if SpecialistName.SYSTEMS in decision.required_specialists():
+        remediation = await _autonomous_remediation(
+            repo, incident_id, trace_id, x_cloud_trace_context
+        )
+    else:
+        await run_in_threadpool(
+            repo.transition, incident_id, IncidentStatus.ESCALATED, trace_id=trace_id
+        )
+
+    final = await run_in_threadpool(repo.get, incident_id)
 
     return IncidentCreated(
         incident_id=incident_id,
-        status=IncidentStatus.INVESTIGATING.value,
+        status=final["status"],
         summary=decision.summary,
         required_specialists=required,
         routes=[
             RouteOut(specialist=r.specialist.value, required=r.required, why=r.why)
             for r in decision.routes
         ],
+        remediation=remediation,
         trace_id=trace_id,
     )
+
+
+async def _autonomous_remediation(
+    repo: IncidentRepository,
+    incident_id: str,
+    trace_id: str | None,
+    trace_header: str | None,
+) -> dict[str, Any]:
+    """Investigate, authorize, execute, verify. No operator step anywhere."""
+    outcome: dict[str, Any] = {"attempted": True}
+
+    # 1. Systems Investigator, its own service under its own identity.
+    response = await run_in_threadpool(
+        call_service,
+        INVESTIGATOR_URL,
+        "/evidence",
+        {"incident_id": incident_id, "service": config.DISPATCH_WEB_SERVICE},
+        trace_header=trace_header,
+    )
+    response.raise_for_status()
+    body = response.json()
+
+    evidence = [Evidence.model_validate(item) for item in body["evidence"]]
+    await run_in_threadpool(repo.save_evidence, incident_id, evidence, trace_id=trace_id)
+    outcome["evidence_count"] = len(evidence)
+
+    if not body.get("proposal"):
+        outcome["reason"] = "no_proposal"
+        await run_in_threadpool(
+            repo.transition, incident_id, IncidentStatus.ESCALATED, trace_id=trace_id
+        )
+        return outcome
+
+    proposal = Proposal.model_validate(body["proposal"])
+    outcome["proposal"] = proposal.action_type.value
+    await run_in_threadpool(
+        repo.transition, incident_id, IncidentStatus.PROPOSED, trace_id=trace_id
+    )
+
+    # 2. Deterministic authorization over TRUSTED_TOOL evidence only.
+    policy_decision = evaluate(proposal, evidence)
+    facts = trusted_evidence_map(evidence)
+    await run_in_threadpool(
+        repo.transition, incident_id, IncidentStatus.POLICY_EVALUATED, trace_id=trace_id
+    )
+    await run_in_threadpool(
+        repo.save_decision,
+        incident_id,
+        proposal,
+        policy_decision,
+        parameters={"target_revision": facts.get("last_good_revision")},
+        trace_id=trace_id,
+    )
+    outcome["decision"] = policy_decision.decision.value
+    outcome["reason_code"] = policy_decision.reason_code
+    outcome["decision_id"] = policy_decision.decision_id
+
+    if policy_decision.decision is not Decision.AUTO_ALLOWED:
+        target = (
+            IncidentStatus.WAITING_FOR_APPROVAL
+            if policy_decision.decision is Decision.APPROVAL_REQUIRED
+            else IncidentStatus.DENIED
+        )
+        await run_in_threadpool(repo.transition, incident_id, target, trace_id=trace_id)
+        return outcome
+
+    await run_in_threadpool(
+        repo.transition, incident_id, IncidentStatus.AUTO_ALLOWED, trace_id=trace_id
+    )
+
+    # 3. Scoped executor. The orchestrator may call it but holds none of its
+    #    infrastructure rights, and passes identifiers only.
+    await run_in_threadpool(
+        repo.transition, incident_id, IncidentStatus.EXECUTING, trace_id=trace_id
+    )
+    execution = await run_in_threadpool(
+        call_service,
+        EXECUTOR_URL,
+        "/execute",
+        {
+            "incident_id": incident_id,
+            "decision_id": policy_decision.decision_id,
+            "attempt_intent": 1,
+        },
+        trace_header=trace_header,
+    )
+    execution.raise_for_status()
+    outcome["execution"] = execution.json()
+
+    if not outcome["execution"].get("mutated"):
+        await run_in_threadpool(
+            repo.transition, incident_id, IncidentStatus.EXECUTION_FAILED, trace_id=trace_id
+        )
+        await run_in_threadpool(
+            repo.transition, incident_id, IncidentStatus.ESCALATED, trace_id=trace_id
+        )
+        return outcome
+
+    await run_in_threadpool(
+        repo.transition, incident_id, IncidentStatus.EXECUTED, trace_id=trace_id
+    )
+
+    # 4. Independent verification under a different, read-only identity.
+    await run_in_threadpool(
+        repo.transition, incident_id, IncidentStatus.VERIFYING, trace_id=trace_id
+    )
+    verification = await run_in_threadpool(
+        call_service,
+        VERIFIER_URL,
+        "/verify",
+        {"incident_id": incident_id, "service": config.DISPATCH_WEB_SERVICE},
+        trace_header=trace_header,
+    )
+    verification.raise_for_status()
+    verdict = verification.json()
+    outcome["verification"] = verdict
+
+    await run_in_threadpool(
+        repo.append_audit,
+        incident_id,
+        actor="verifier",
+        event="verification",
+        payload={
+            "verdict": verdict.get("verdict"),
+            "http_status": verdict.get("http_status"),
+            "active_revision": verdict.get("active_revision"),
+        },
+        trace_id=trace_id,
+    )
+
+    if verdict.get("verdict") == "RECOVERED":
+        await run_in_threadpool(
+            repo.transition, incident_id, IncidentStatus.RESOLVED, trace_id=trace_id
+        )
+    else:
+        await run_in_threadpool(
+            repo.transition,
+            incident_id,
+            IncidentStatus.REMEDIATION_FAILED,
+            trace_id=trace_id,
+        )
+        await run_in_threadpool(
+            repo.transition, incident_id, IncidentStatus.ESCALATED, trace_id=trace_id
+        )
+    return outcome
 
 
 @app.get("/incidents/{incident_id}")
