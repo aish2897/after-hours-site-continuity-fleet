@@ -31,14 +31,14 @@ capability beyond the state recorded here.
 | Capability | Status | Evidence |
 |---|---|---|
 | Gemini 3.7 Flash via Vertex AI | **`VERIFIED`** | [`gate-a-vertex-gemini.md`](docs/evidence/gate-a-vertex-gemini.md) |
+| Google ADK agent, typed output | **`VERIFIED`** | [`gate-a-adk-routing.md`](docs/evidence/gate-a-adk-routing.md) |
+| Evidence-dependent specialist routing | **`VERIFIED`** | [`gate-a-adk-routing.md`](docs/evidence/gate-a-adk-routing.md) |
 | Deterministic policy gate | `IMPLEMENTED` | `tests/policy/test_decision_matrix.py` — 26 |
 | Agent capability registry | `IMPLEMENTED` | `tests/policy/test_registry.py` — 9 |
 | Incident state machine | `IMPLEMENTED` | `tests/unit/test_state_machine.py` — 15 |
 | Deterministic idempotency keys | `IMPLEMENTED` | `tests/unit/test_ids.py` — 8 |
 | Hash-chained audit + tamper detection | `IMPLEMENTED` | `tests/unit/test_audit_chain.py` — 9 |
-| Evidence-dependent routing contract | `IMPLEMENTED` | `tests/unit/test_routing.py` — 7 |
 | Trusted/untrusted evidence separation | `IMPLEMENTED` | `tests/policy/test_decision_matrix.py` |
-| Google ADK | `NOT INTEGRATED` | in progress |
 | Cloud Run services | `NOT INTEGRATED` | Gate B |
 | Firestore durable state | `NOT INTEGRATED` | Gate B |
 | Real IAM permission boundaries | `NOT INTEGRATED` | 3 proofs required |

@@ -1,0 +1,33 @@
+{
+  "model": "gemini-3.7-flash",
+  "location": "global",
+  "project": "site-continuity-fleet",
+  "started_utc": "2026-08-15T14:43:38.758267+00:00",
+  "report": "Im the night duty manager at the Melbourne West site. The dispatch screens in the loading bay are all showing an error page and the drivers cant print run sheets. Phones and the wifi seem fine. Nobody has touched anything tonight.",
+  "routes": [
+    {
+      "specialist": "network",
+      "required": false,
+      "why": "Local Wi-Fi and phone systems are working normally, indicating the site network is operational."
+    },
+    {
+      "specialist": "systems",
+      "required": true,
+      "why": "The dispatch application is displaying errors and printing services are unavailable."
+    },
+    {
+      "specialist": "security",
+      "required": false,
+      "why": "There are no signs of unauthorized access or security incidents."
+    },
+    {
+      "specialist": "continuity",
+      "required": false,
+      "why": "The issue is isolated to internal application triage and does not yet require vendor escalation or external communication."
+    }
+  ],
+  "summary": "The dispatch screen and printing application at the Melbourne West site are down and need investigation by the systems team.",
+  "required_specialists": [
+    "systems"
+  ]
+}
