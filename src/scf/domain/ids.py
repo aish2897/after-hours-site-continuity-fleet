@@ -35,23 +35,27 @@ def new_action_id() -> str:
     return f"ACT-{uuid4().hex[:10].upper()}"
 
 
-def derive_idempotency_key(
+def derive_execution_id(
     *,
     incident_id: str,
     action_type: str,
     target_ref: str,
     decision_id: str,
-    attempt_intent: int = 1,
 ) -> str:
-    """Deterministic execution key.
+    """Stable, decision-bound execution identity.
 
-    Derived from the authorizing decision, so re-delivery of the same approved
-    decision collapses to one execution. A deliberate retry supplies a new
-    attempt_intent and is therefore treated as a distinct, authorized attempt.
+    One authoritative decision gets exactly one execution identity, for the
+    lifetime of that decision. Nothing a caller supplies participates in the
+    derivation, so no request field can manufacture a second infrastructure
+    execution for the same authorization.
+
+    An earlier design mixed in a caller-supplied `attempt_intent`, which meant
+    any client able to reach the executor could mint a fresh key and re-run a
+    mutation that had already been performed. A genuine retry must instead be
+    driven by authoritative recovery state — see the execution lifecycle in
+    scf.state.execution_store.
     """
-    material = "|".join(
-        [incident_id, action_type, target_ref, decision_id, str(attempt_intent)]
-    )
+    material = "|".join([incident_id, action_type, target_ref, decision_id])
     return sha256(material.encode("utf-8")).hexdigest()
 
 

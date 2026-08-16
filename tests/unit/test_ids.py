@@ -5,7 +5,7 @@ from scf.domain.ids import (
     canonical_hash,
     canonical_json,
     chain_hash,
-    derive_idempotency_key,
+    derive_execution_id,
     new_incident_id,
 )
 
@@ -18,35 +18,38 @@ BASE = {
 
 
 def test_key_is_stable_across_calls():
-    assert derive_idempotency_key(**BASE) == derive_idempotency_key(**BASE)
+    assert derive_execution_id(**BASE) == derive_execution_id(**BASE)
 
 
 def test_key_is_stable_across_processes():
     """No uuid, clock, or hostname may leak into the key material."""
-    expected = derive_idempotency_key(**BASE)
+    expected = derive_execution_id(**BASE)
     for _ in range(50):
-        assert derive_idempotency_key(**BASE) == expected
+        assert derive_execution_id(**BASE) == expected
 
 
-def test_deliberate_retry_produces_a_distinct_key():
-    first = derive_idempotency_key(**BASE, attempt_intent=1)
-    second = derive_idempotency_key(**BASE, attempt_intent=2)
-    assert first != second
+def test_no_extra_input_can_vary_the_execution_id():
+    """One decision, one execution identity. No caller field participates."""
+    import inspect
+
+    params = set(inspect.signature(derive_execution_id).parameters)
+    assert params == {"incident_id", "action_type", "target_ref", "decision_id"}
+    assert "attempt_intent" not in params
 
 
 def test_each_field_changes_the_key():
-    baseline = derive_idempotency_key(**BASE)
+    baseline = derive_execution_id(**BASE)
     for field, value in [
         ("incident_id", "INC-20260815-ZZZ999"),
         ("action_type", "RESTART_APPLICATION_SERVICE"),
         ("target_ref", "site-directory"),
         ("decision_id", "DEC-0002"),
     ]:
-        assert derive_idempotency_key(**{**BASE, field: value}) != baseline
+        assert derive_execution_id(**{**BASE, field: value}) != baseline
 
 
 def test_key_shape():
-    key = derive_idempotency_key(**BASE)
+    key = derive_execution_id(**BASE)
     assert len(key) == 64
     assert set(key) <= set("0123456789abcdef")
 

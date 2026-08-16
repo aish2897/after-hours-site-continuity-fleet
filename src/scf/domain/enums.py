@@ -59,6 +59,22 @@ class SpecialistName(StrEnum):
     CONTINUITY = "continuity"
 
 
+class ExecutionState(StrEnum):
+    """Execution lifecycle in the execution plane.
+
+    Firestore and the Cloud Run Admin API cannot be committed atomically, so
+    this records where an execution reached. Recovery reconciles against real
+    infrastructure rather than assuming a crashed execution did or did not act.
+    """
+
+    CLAIMED = "CLAIMED"
+    MUTATION_REQUESTED = "MUTATION_REQUESTED"
+    MUTATED = "MUTATED"
+    VERIFIED = "VERIFIED"
+    FAILED = "FAILED"
+    STALE = "STALE"
+
+
 class ActionState(StrEnum):
     PENDING = "PENDING"
     EXECUTING = "EXECUTING"

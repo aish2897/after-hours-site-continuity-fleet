@@ -5,6 +5,7 @@ Pure and dependency-free apart from pydantic. No cloud, no I/O, no LLM.
 
 from scf.domain.enums import (
     ActionState,
+    ExecutionState,
     ActionType,
     ApprovalState,
     Decision,
@@ -18,7 +19,7 @@ from scf.domain.ids import (
     canonical_hash,
     canonical_json,
     chain_hash,
-    derive_idempotency_key,
+    derive_execution_id,
     new_action_id,
     new_decision_id,
     new_incident_id,
@@ -56,6 +57,7 @@ __all__ = [
     "ApprovalState",
     "AuditRecord",
     "Decision",
+    "ExecutionState",
     "Evidence",
     "IllegalTransition",
     "IncidentDoc",
@@ -71,7 +73,7 @@ __all__ = [
     "canonical_hash",
     "canonical_json",
     "chain_hash",
-    "derive_idempotency_key",
+    "derive_execution_id",
     "is_terminal",
     "new_action_id",
     "new_decision_id",
