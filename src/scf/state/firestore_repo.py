@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from google.api_core.exceptions import AlreadyExists
+
 from google.cloud import firestore
 
 from scf import config
@@ -24,7 +24,7 @@ AUDIT = "audit"
 DECISIONS = "decisions"
 ACTIONS = "actions"
 EVIDENCE = "evidence"
-IDEMPOTENCY = "idempotency"
+
 
 
 class IncidentNotFound(KeyError):
@@ -36,10 +36,24 @@ class DecisionNotFound(KeyError):
 
 
 class IncidentRepository:
-    """Firestore-backed incident store. Firestore is authoritative, not memory."""
+    """Authoritative control plane: incidents, evidence, decisions, audit.
 
-    def __init__(self, client: firestore.Client | None = None) -> None:
-        self._db = client or firestore.Client(project=config.PROJECT_ID)
+    Only authoritative writers (the orchestrator) bind with write access here.
+    The executor's identity is granted read-only on this database through a
+    per-database IAM condition, so it can obtain authorization but cannot
+    manufacture or alter it.
+    """
+
+    def __init__(
+        self,
+        client: firestore.Client | None = None,
+        database: str | None = None,
+    ) -> None:
+        config.validate_database_config()
+        self.database = database or config.AUTHORITATIVE_DATABASE
+        self._db = client or firestore.Client(
+            project=config.PROJECT_ID, database=self.database
+        )
 
     # --- reads ---------------------------------------------------------------
 
@@ -227,33 +241,6 @@ class IncidentRepository:
         if not snapshot.exists:
             raise DecisionNotFound(f"{incident_id}/{decision_id}")
         return snapshot.to_dict()
-
-    def claim_idempotency(
-        self,
-        key: str,
-        *,
-        incident_id: str,
-        decision_id: str,
-        action_id: str,
-    ) -> bool:
-        """Atomically claim the right to execute exactly once.
-
-        Firestore `create` fails if the document already exists. That failure
-        IS the duplicate signal — there is no read-then-write race, no
-        in-memory set, and no process-local lock.
-        """
-        try:
-            self._db.collection(IDEMPOTENCY).document(key).create(
-                {
-                    "incident_id": incident_id,
-                    "decision_id": decision_id,
-                    "action_id": action_id,
-                    "claimed_at": firestore.SERVER_TIMESTAMP,
-                }
-            )
-            return True
-        except AlreadyExists:
-            return False
 
     def record_action(self, incident_id: str, action: ActionRecord) -> None:
         (

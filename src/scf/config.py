@@ -40,6 +40,34 @@ VERTEX_HOST: Final[str] = "aiplatform.googleapis.com"
 # finishReason=MAX_TOKENS before any visible text is produced.
 DEFAULT_MAX_OUTPUT_TOKENS: Final[int] = 2048
 
+# --- Firestore planes --------------------------------------------------------
+# Two databases, isolated by per-database IAM conditions. The identity able to
+# mutate Cloud Run must be unable to modify the authorization decision that
+# permits that mutation.
+#
+# This is database-level isolation, not collection-level. Firestore IAM cannot
+# scope below a database, and SECURITY.md says so rather than implying finer
+# granularity than exists.
+
+AUTHORITATIVE_DATABASE: Final[str] = "(default)"
+EXECUTION_DATABASE: Final[str] = "execution-state"
+
+
+def validate_database_config() -> None:
+    """Fail closed if the planes are missing, blank, or collapsed into one."""
+    for name, value in (
+        ("AUTHORITATIVE_DATABASE", AUTHORITATIVE_DATABASE),
+        ("EXECUTION_DATABASE", EXECUTION_DATABASE),
+    ):
+        if not value or not value.strip():
+            raise RuntimeError(f"{name} is not configured")
+    if AUTHORITATIVE_DATABASE == EXECUTION_DATABASE:
+        raise RuntimeError(
+            "AUTHORITATIVE_DATABASE and EXECUTION_DATABASE must differ: "
+            "collapsing them would let the executor rewrite its own authorization"
+        )
+
+
 # --- Targets -----------------------------------------------------------------
 DISPATCH_WEB_SERVICE: Final[str] = "dispatch-web"
 UNRELATED_SERVICE: Final[str] = "site-directory"  # IAM proof C negative target
