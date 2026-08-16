@@ -6,7 +6,8 @@ from typing import Any
 from google.cloud import firestore
 
 from scf import config
-from scf.audit.chain import append as append_audit_record
+from scf.audit.chain import seal
+from scf.domain.ids import GENESIS_HASH
 from scf.domain.enums import IncidentStatus, TrustLevel
 from scf.domain.models import (
     ActionRecord,
@@ -79,6 +80,8 @@ class IncidentRepository:
 
     def create(self, incident: IncidentDoc) -> str:
         payload = incident.model_dump(mode="json")
+        payload["audit_seq"] = -1
+        payload["audit_tail_hash"] = GENESIS_HASH
         self._doc_ref(incident.incident_id).create(payload)
         self.append_audit(
             incident.incident_id,
@@ -88,6 +91,57 @@ class IncidentRepository:
             trace_id=incident.trace_id,
         )
         return incident.incident_id
+
+    def _commit_audit(
+        self,
+        transaction: firestore.Transaction,
+        incident_id: str,
+        snapshot_data: dict[str, Any],
+        *,
+        actor: str,
+        event: str,
+        payload: dict[str, Any],
+        actor_identity: str | None,
+        trace_id: str | None,
+        extra_updates: dict[str, Any] | None = None,
+    ) -> AuditRecord:
+        """Allocate the next audit slot and write it inside a transaction.
+
+        The incident document carries `audit_seq` and `audit_tail_hash`, so the
+        sequence is allocated from the same document the transaction already
+        guards. Two concurrent appends contend on that document and Firestore
+        retries the loser, so they cannot be handed the same sequence number.
+        """
+        doc_ref = self._doc_ref(incident_id)
+        seq = int(snapshot_data.get("audit_seq", -1)) + 1
+        prev_hash = snapshot_data.get("audit_tail_hash") or GENESIS_HASH
+
+        record = seal(
+            AuditRecord(
+                seq=seq,
+                prev_hash=prev_hash,
+                actor=actor,
+                actor_identity=actor_identity,
+                event=event,
+                payload=payload,
+                trace_id=trace_id,
+            )
+        )
+
+        updates: dict[str, Any] = {
+            "audit_seq": seq,
+            "audit_tail_hash": record.hash,
+            "updated_at": firestore.SERVER_TIMESTAMP,
+        }
+        if extra_updates:
+            updates.update(extra_updates)
+
+        transaction.update(doc_ref, updates)
+        transaction.create(
+            doc_ref.collection(AUDIT).document(f"{seq:06d}"),
+            record.model_dump(mode="json"),
+        )
+        return record
 
     def append_audit(
         self,
@@ -99,27 +153,35 @@ class IncidentRepository:
         actor_identity: str | None = None,
         trace_id: str | None = None,
     ) -> AuditRecord:
-        existing = self.audit_trail(incident_id)
-        record = append_audit_record(
-            existing,
-            actor=actor,
-            event=event,
-            payload=payload or {},
-            actor_identity=actor_identity,
-            trace_id=trace_id,
-        )
-        (
-            self._doc_ref(incident_id)
-            .collection(AUDIT)
-            .document(f"{record.seq:06d}")
-            .create(record.model_dump(mode="json"))
-        )
-        return record
+        doc_ref = self._doc_ref(incident_id)
+
+        @firestore.transactional
+        def _apply(transaction: firestore.Transaction) -> AuditRecord:
+            snapshot = doc_ref.get(transaction=transaction)
+            if not snapshot.exists:
+                raise IncidentNotFound(incident_id)
+            return self._commit_audit(
+                transaction,
+                incident_id,
+                snapshot.to_dict(),
+                actor=actor,
+                event=event,
+                payload=payload or {},
+                actor_identity=actor_identity,
+                trace_id=trace_id,
+            )
+
+        return _apply(self._db.transaction())
 
     def transition(
         self, incident_id: str, target: IncidentStatus, *, trace_id: str | None = None
     ) -> IncidentStatus:
-        """Compare-and-set transition inside a Firestore transaction."""
+        """Legal transition and its audit record, committed all-or-none.
+
+        Previously the transition committed first and the audit record was
+        appended afterwards, so a crash between them left authoritative state
+        that the trail did not account for.
+        """
         doc_ref = self._doc_ref(incident_id)
 
         @firestore.transactional
@@ -127,26 +189,23 @@ class IncidentRepository:
             snapshot = doc_ref.get(transaction=transaction)
             if not snapshot.exists:
                 raise IncidentNotFound(incident_id)
-            current = IncidentStatus(snapshot.to_dict()["status"])
+            data = snapshot.to_dict()
+            current = IncidentStatus(data["status"])
             assert_transition(current, target)
-            transaction.update(
-                doc_ref,
-                {
-                    "status": target.value,
-                    "updated_at": firestore.SERVER_TIMESTAMP,
-                },
+            self._commit_audit(
+                transaction,
+                incident_id,
+                data,
+                actor="orchestrator",
+                event="state_transition",
+                payload={"from": current.value, "to": target.value},
+                actor_identity=None,
+                trace_id=trace_id,
+                extra_updates={"status": target.value},
             )
             return current
 
-        previous = _apply(self._db.transaction())
-        self.append_audit(
-            incident_id,
-            actor="orchestrator",
-            event="state_transition",
-            payload={"from": previous.value, "to": target.value},
-            trace_id=trace_id,
-        )
-        return previous
+        return _apply(self._db.transaction())
 
     def save_evidence(
         self,
