@@ -186,6 +186,83 @@ async def create_incident(
     )
 
 
+class DownstreamFailure(Exception):
+    """A service-to-service call failed. The incident must not hang."""
+
+    def __init__(self, service: str, kind: str, detail: str) -> None:
+        super().__init__(f"{service}: {kind}")
+        self.service = service
+        self.kind = kind
+        self.detail = detail[:300]
+
+
+#: Legal walk from a mid-workflow state to ESCALATED. The state machine has no
+#: direct edge from most active states, so failure has to be routed through the
+#: declared failure states rather than jumping.
+ESCALATION_PATHS: dict[IncidentStatus, tuple[IncidentStatus, ...]] = {
+    IncidentStatus.POLICY_EVALUATED: (IncidentStatus.DENIED, IncidentStatus.ESCALATED),
+    IncidentStatus.AUTO_ALLOWED: (
+        IncidentStatus.EXECUTING,
+        IncidentStatus.EXECUTION_FAILED,
+        IncidentStatus.ESCALATED,
+    ),
+    IncidentStatus.EXECUTING: (
+        IncidentStatus.EXECUTION_FAILED,
+        IncidentStatus.ESCALATED,
+    ),
+    IncidentStatus.EXECUTED: (
+        IncidentStatus.VERIFYING,
+        IncidentStatus.REMEDIATION_FAILED,
+        IncidentStatus.ESCALATED,
+    ),
+    IncidentStatus.VERIFYING: (
+        IncidentStatus.REMEDIATION_FAILED,
+        IncidentStatus.ESCALATED,
+    ),
+}
+
+
+async def _escalate(
+    repo: IncidentRepository, incident_id: str, trace_id: str | None
+) -> str:
+    """Drive the incident to a terminal state along a legal path."""
+    current = IncidentStatus(
+        (await run_in_threadpool(repo.get, incident_id))["status"]
+    )
+    if current in (IncidentStatus.RESOLVED, IncidentStatus.ESCALATED):
+        return current.value
+    for step in ESCALATION_PATHS.get(current, (IncidentStatus.ESCALATED,)):
+        await run_in_threadpool(repo.transition, incident_id, step, trace_id=trace_id)
+    return IncidentStatus.ESCALATED.value
+
+
+async def _call(
+    url: str,
+    path: str,
+    payload: dict[str, Any],
+    *,
+    service: str,
+    trace_header: str | None,
+) -> dict[str, Any]:
+    """Bounded, explicitly-typed downstream call."""
+    if not url:
+        raise DownstreamFailure(service, "not_configured", "service URL is empty")
+    try:
+        response = await run_in_threadpool(
+            call_service, url, path, payload, trace_header=trace_header
+        )
+    except Exception as exc:  # noqa: BLE001 - converted to a typed failure
+        raise DownstreamFailure(service, type(exc).__name__, str(exc)) from exc
+    if response.status_code >= 400:
+        raise DownstreamFailure(
+            service, f"http_{response.status_code}", response.text
+        )
+    try:
+        return response.json()
+    except ValueError as exc:
+        raise DownstreamFailure(service, "malformed_response", str(exc)) from exc
+
+
 async def _autonomous_remediation(
     repo: IncidentRepository,
     incident_id: str,
@@ -194,17 +271,50 @@ async def _autonomous_remediation(
 ) -> dict[str, Any]:
     """Investigate, authorize, execute, verify. No operator step anywhere."""
     outcome: dict[str, Any] = {"attempted": True}
+    try:
+        return await _run_remediation(repo, incident_id, trace_id, trace_header, outcome)
+    except DownstreamFailure as failure:
+        await run_in_threadpool(
+            repo.append_audit,
+            incident_id,
+            actor="orchestrator",
+            event="downstream_failure",
+            payload={
+                "service": failure.service,
+                "kind": failure.kind,
+                "detail": failure.detail,
+            },
+            trace_id=trace_id,
+        )
+        log_event(
+            "downstream_failure",
+            severity="ERROR",
+            trace_id=trace_id,
+            incident_id=incident_id,
+            failed_service=failure.service,
+            error_kind=failure.kind,
+        )
+        outcome["failed"] = {"service": failure.service, "kind": failure.kind}
+        outcome["final_status"] = await _escalate(repo, incident_id, trace_id)
+        return outcome
+
+
+async def _run_remediation(
+    repo: IncidentRepository,
+    incident_id: str,
+    trace_id: str | None,
+    trace_header: str | None,
+    outcome: dict[str, Any],
+) -> dict[str, Any]:
 
     # 1. Systems Investigator, its own service under its own identity.
-    response = await run_in_threadpool(
-        call_service,
+    body = await _call(
         INVESTIGATOR_URL,
         "/evidence",
         {"incident_id": incident_id, "service": config.DISPATCH_WEB_SERVICE},
+        service="investigator",
         trace_header=trace_header,
     )
-    response.raise_for_status()
-    body = response.json()
 
     evidence = [Evidence.model_validate(item) for item in body["evidence"]]
     await run_in_threadpool(repo.save_evidence, incident_id, evidence, trace_id=trace_id)
@@ -234,7 +344,14 @@ async def _autonomous_remediation(
         incident_id,
         proposal,
         policy_decision,
-        parameters={"target_revision": facts.get("last_good_revision")},
+        parameters={
+            # The decision authorizes ONE exact revision. The executor may not
+            # substitute another, and the verifier must observe this one.
+            "authorized_target_revision": facts.get("candidate_revision"),
+            # TOCTOU guards captured from the same trusted evidence snapshot.
+            "expected_source_revision": facts.get("active_revision"),
+            "expected_etag": facts.get("service_etag"),
+        },
         trace_id=trace_id,
     )
     outcome["decision"] = policy_decision.decision.value
@@ -259,19 +376,13 @@ async def _autonomous_remediation(
     await run_in_threadpool(
         repo.transition, incident_id, IncidentStatus.EXECUTING, trace_id=trace_id
     )
-    execution = await run_in_threadpool(
-        call_service,
+    receipt = await _call(
         EXECUTOR_URL,
         "/execute",
-        {
-            "incident_id": incident_id,
-            "decision_id": policy_decision.decision_id,
-            "attempt_intent": 1,
-        },
+        {"incident_id": incident_id, "decision_id": policy_decision.decision_id},
+        service="executor",
         trace_header=trace_header,
     )
-    execution.raise_for_status()
-    receipt = execution.json()
     outcome["execution"] = receipt
 
     # The executor cannot write the control plane. The orchestrator, which is
@@ -314,7 +425,7 @@ async def _autonomous_remediation(
             trace_id=trace_id,
         )
 
-    if not receipt.get("mutated"):
+    if not (receipt.get("mutated") or receipt.get("reconciled")):
         await run_in_threadpool(
             repo.transition, incident_id, IncidentStatus.EXECUTION_FAILED, trace_id=trace_id
         )
@@ -331,15 +442,17 @@ async def _autonomous_remediation(
     await run_in_threadpool(
         repo.transition, incident_id, IncidentStatus.VERIFYING, trace_id=trace_id
     )
-    verification = await run_in_threadpool(
-        call_service,
+    verdict = await _call(
         VERIFIER_URL,
         "/verify",
-        {"incident_id": incident_id, "service": config.DISPATCH_WEB_SERVICE},
+        {
+            "incident_id": incident_id,
+            "service": config.DISPATCH_WEB_SERVICE,
+            "expected_revision": facts.get("candidate_revision"),
+        },
+        service="verifier",
         trace_header=trace_header,
     )
-    verification.raise_for_status()
-    verdict = verification.json()
     outcome["verification"] = verdict
 
     await run_in_threadpool(

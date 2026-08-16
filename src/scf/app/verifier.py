@@ -31,6 +31,11 @@ class VerifyRequest(BaseModel):
 
     incident_id: str = Field(min_length=3)
     service: str = config.DISPATCH_WEB_SERVICE
+    expected_revision: str | None = Field(
+        default=None,
+        description="The exact revision the decision authorized. HTTP 200 from "
+        "the wrong revision must not resolve an incident.",
+    )
 
 
 @app.get("/health")
@@ -44,7 +49,7 @@ def health() -> dict[str, Any]:
     }
 
 
-def _observe(service: str) -> dict[str, Any]:
+def _observe(service: str, expected_revision: str | None = None) -> dict[str, Any]:
     described = describe_service(service)
     url = described.get("uri", "")
     active = ""
@@ -54,8 +59,16 @@ def _observe(service: str) -> dict[str, Any]:
             break
 
     status_code, body = probe_health(url)
+    responding = status_code == 200 and "healthy" in body.lower()
+    # Both conditions are required. A healthy response from an unauthorized
+    # revision is not recovery; it is a different service state that happens
+    # to return 200.
+    revision_matches = expected_revision is None or active == expected_revision
     return {
-        "healthy": status_code == 200 and "healthy" in body.lower(),
+        "healthy": responding and revision_matches,
+        "http_healthy": responding,
+        "revision_matches_authorized": revision_matches,
+        "expected_revision": expected_revision,
         "http_status": status_code,
         "body": body[:120],
         "active_revision": active,
@@ -64,7 +77,10 @@ def _observe(service: str) -> dict[str, Any]:
 
 
 def _verify(
-    service: str, settle_seconds: int = SETTLE_SECONDS, interval: float = 3.0
+    service: str,
+    expected_revision: str | None = None,
+    settle_seconds: int = SETTLE_SECONDS,
+    interval: float = 3.0,
 ) -> dict[str, Any]:
     """Observe the live service until it recovers or the window expires.
 
@@ -76,11 +92,11 @@ def _verify(
     """
     deadline = time.monotonic() + settle_seconds
     attempts = 0
-    observation = _observe(service)
+    observation = _observe(service, expected_revision)
     while not observation["healthy"] and time.monotonic() < deadline:
         time.sleep(interval)
         attempts += 1
-        observation = _observe(service)
+        observation = _observe(service, expected_revision)
 
     observation["verdict"] = RECOVERED if observation.pop("healthy") else STILL_FAILING
     observation["probe_attempts"] = attempts + 1
@@ -94,7 +110,9 @@ async def verify(
     x_cloud_trace_context: str | None = Header(default=None),
 ) -> dict[str, Any]:
     trace_id = trace_id_from_header(x_cloud_trace_context)
-    result = await run_in_threadpool(_verify, request.service)
+    result = await run_in_threadpool(
+        _verify, request.service, request.expected_revision
+    )
     log_event(
         "verification_completed",
         trace_id=trace_id,
@@ -102,6 +120,8 @@ async def verify(
         verdict=result["verdict"],
         http_status=result["http_status"],
         active_revision=result["active_revision"],
+        expected_revision=request.expected_revision,
+        revision_matches_authorized=result["revision_matches_authorized"],
     )
     result["incident_id"] = request.incident_id
     result["verified_by_revision"] = os.environ.get("K_REVISION")

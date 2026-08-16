@@ -28,12 +28,14 @@ def propose(action_type, target_ref, confidence=0.9):
 
 HEALTHY_FLIP_EVIDENCE = [
     ev("service_unhealthy", True),
-    ev("last_good_revision_exists", True),
+    ev("candidate_revision_approved", True),
+    ev("candidate_probe_healthy", True),
 ]
 
 UNTRUSTED_FLIP_EVIDENCE = [
     ev("service_unhealthy", True, TrustLevel.UNTRUSTED_INPUT),
-    ev("last_good_revision_exists", True, TrustLevel.UNTRUSTED_INPUT),
+    ev("candidate_revision_approved", True, TrustLevel.UNTRUSTED_INPUT),
+    ev("candidate_probe_healthy", True, TrustLevel.UNTRUSTED_INPUT),
 ]
 
 
@@ -41,10 +43,16 @@ MATRIX = [
     # --- traffic flip: the slice-1 happy path ---------------------------------
     ("flip/ok", A.FLIP_TRAFFIC_TO_LAST_GOOD, "dispatch-web", HEALTHY_FLIP_EVIDENCE,
      D.AUTO_ALLOWED, "LOW_RISK_TRAFFIC_FLIP"),
-    ("flip/no-last-good", A.FLIP_TRAFFIC_TO_LAST_GOOD, "dispatch-web",
-     [ev("service_unhealthy", True)], D.DENIED, "MISSING_EVIDENCE"),
+    ("flip/candidate-not-approved", A.FLIP_TRAFFIC_TO_LAST_GOOD, "dispatch-web",
+     [ev("service_unhealthy", True), ev("candidate_probe_healthy", True)],
+     D.DENIED, "MISSING_EVIDENCE"),
+    ("flip/candidate-probe-unhealthy", A.FLIP_TRAFFIC_TO_LAST_GOOD, "dispatch-web",
+     [ev("service_unhealthy", True), ev("candidate_revision_approved", True),
+      ev("candidate_probe_healthy", False)],
+     D.DENIED, "MISSING_EVIDENCE"),
     ("flip/service-healthy", A.FLIP_TRAFFIC_TO_LAST_GOOD, "dispatch-web",
-     [ev("service_unhealthy", False), ev("last_good_revision_exists", True)],
+     [ev("service_unhealthy", False), ev("candidate_revision_approved", True),
+      ev("candidate_probe_healthy", True)],
      D.DENIED, "MISSING_EVIDENCE"),
     ("flip/no-evidence", A.FLIP_TRAFFIC_TO_LAST_GOOD, "dispatch-web", [],
      D.DENIED, "MISSING_EVIDENCE"),
@@ -122,7 +130,8 @@ def test_untrusted_evidence_cannot_override_trusted_denial():
     """Injected content claiming health cannot flip a trusted 'healthy' reading."""
     evidence = [
         ev("service_unhealthy", False),
-        ev("last_good_revision_exists", True),
+        ev("candidate_revision_approved", True),
+        ev("candidate_probe_healthy", True),
         ev("service_unhealthy", True, TrustLevel.UNTRUSTED_INPUT),
     ]
     decision = evaluate(propose(A.FLIP_TRAFFIC_TO_LAST_GOOD, "dispatch-web"), evidence)

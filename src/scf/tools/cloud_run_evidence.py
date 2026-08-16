@@ -75,38 +75,60 @@ def _ev(key: str, value: Any, supports: str) -> Evidence:
     )
 
 
+KNOWN_GOOD_TAG = "known-good"
+
+
 def gather_evidence(service: str = config.DISPATCH_WEB_SERVICE) -> list[Evidence]:
-    """Collect real Cloud Run state as trusted evidence."""
+    """Collect real Cloud Run state as trusted evidence.
+
+    The rollback candidate is NOT inferred from "some revision that is not
+    currently active". It is the revision an operator has explicitly approved
+    by attaching the `known-good` Cloud Run traffic tag, and the investigator
+    independently probes that tag's own URL to prove it actually serves a
+    healthy response before anything may be proposed.
+    """
     described = describe_service(service)
     url = described.get("uri", "")
-    traffic = described.get("trafficStatuses") or described.get("traffic") or []
-    active_revision = ""
-    for entry in traffic:
-        if entry.get("percent") == 100:
-            active_revision = (entry.get("revision") or "").rsplit("/", 1)[-1]
-            break
+    etag = described.get("etag", "")
+    traffic = described.get("trafficStatuses") or []
 
-    revisions = [r["name"].rsplit("/", 1)[-1] for r in list_revisions(service)]
-    known_good = [r for r in revisions if r != active_revision]
+    active_revision = ""
+    candidate_revision = ""
+    candidate_url = ""
+    for entry in traffic:
+        revision = (entry.get("revision") or "").rsplit("/", 1)[-1]
+        if entry.get("percent") == 100:
+            active_revision = revision
+        if entry.get("tag") == KNOWN_GOOD_TAG:
+            candidate_revision = revision
+            candidate_url = entry.get("uri") or ""
 
     status_code, body = probe_health(url)
-    unhealthy = status_code != 200
+    approved = bool(candidate_revision) and candidate_revision != active_revision
+
+    candidate_status, candidate_body = (
+        probe_health(candidate_url) if candidate_url else (0, "no known-good tag")
+    )
+    candidate_healthy = candidate_status == 200 and "healthy" in candidate_body.lower()
 
     return [
         _ev("service_exists", True, "target is a real Cloud Run service"),
-        _ev("service_url", url, "where health was probed"),
+        _ev("service_url", url, "where live health was probed"),
+        _ev("service_etag", etag, "precondition token for safe mutation"),
         _ev("active_revision", active_revision, "revision currently serving traffic"),
-        _ev("available_revisions", revisions, "revisions that could receive traffic"),
         _ev("http_status", status_code, "observed health of the live service"),
         _ev("http_body", body[:200], "observed response body"),
-        _ev("service_unhealthy", unhealthy, "whether remediation is warranted"),
-        _ev(
-            "last_good_revision_exists",
-            bool(known_good),
-            "whether a rollback target is available",
-        ),
-        _ev("last_good_revision", known_good[0] if known_good else None,
-            "candidate rollback target"),
+        _ev("service_unhealthy", status_code != 200, "whether remediation is warranted"),
+        _ev("candidate_revision", candidate_revision or None,
+            "operator-approved rollback target, from the known-good tag"),
+        _ev("candidate_revision_approved", approved,
+            "tag present and distinct from the failing revision"),
+        _ev("candidate_probe_url", candidate_url or None,
+            "tag URL probed independently of live traffic"),
+        _ev("candidate_probe_http_status", candidate_status,
+            "candidate revision probed directly"),
+        _ev("candidate_probe_healthy", candidate_healthy,
+            "candidate proven healthy before being proposed"),
     ]
 
 
@@ -122,7 +144,11 @@ def propose_remediation(
     facts = {item.key: item.value for item in evidence}
     if not facts.get("service_unhealthy"):
         return None
-    if not facts.get("last_good_revision_exists"):
+    # A rollback target must be approved AND independently proven healthy.
+    # "Not currently active" is not evidence of anything.
+    if not facts.get("candidate_revision_approved"):
+        return None
+    if not facts.get("candidate_probe_healthy"):
         return None
 
     return Proposal(
@@ -131,8 +157,9 @@ def propose_remediation(
         confidence=0.9,
         rationale=(
             f"{service} returned HTTP {facts.get('http_status')} on revision "
-            f"{facts.get('active_revision')}; revision "
-            f"{facts.get('last_good_revision')} is available to receive traffic."
+            f"{facts.get('active_revision')}. The approved known-good revision "
+            f"{facts.get('candidate_revision')} was probed directly and returned "
+            f"HTTP {facts.get('candidate_probe_http_status')}."
         ),
         proposed_by=f"agent:{AGENT}",
     )

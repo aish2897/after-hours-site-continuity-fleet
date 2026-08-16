@@ -7,7 +7,7 @@ from pydantic import ValidationError
 
 from scf.app.executor import EXECUTABLE, ExecuteRequest, _validate
 from scf.domain.enums import ActionType, Decision
-from scf.domain.ids import derive_idempotency_key
+from scf.domain.ids import derive_execution_id
 
 INCIDENT = "INC-20260815-20ABB8"
 DECISION = "DEC-C57E81CD0D"
@@ -21,7 +21,7 @@ def good_decision(**overrides):
         "target_ref": "dispatch-web",
         "decision": Decision.AUTO_ALLOWED.value,
         "revoked": False,
-        "parameters": {"target_revision": "dispatch-web-00003-x87"},
+        "parameters": {"authorized_target_revision": "dispatch-web-00003-x87"},
     }
     base.update(overrides)
     return base
@@ -41,6 +41,8 @@ def test_request_schema_cannot_carry_an_authorization_claim():
         ("action_type", "FLIP_TRAFFIC_TO_LAST_GOOD"),
         ("authorized", True),
         ("policy_decision", "AUTO_ALLOWED"),
+        ("attempt_intent", 2),
+        ("target_revision", "dispatch-web-00004-jqm"),
     ]:
         with pytest.raises(ValidationError):
             ExecuteRequest(incident_id=INCIDENT, decision_id=DECISION, **{field: value})
@@ -61,7 +63,7 @@ def test_valid_stored_decision_passes():
         ({"action_type": "EXPORT_CREDENTIALS"}, "unsupported_action_type:EXPORT_CREDENTIALS"),
         ({"action_type": "DISABLE_FIREWALL"}, "unsupported_action_type:DISABLE_FIREWALL"),
         ({"target_ref": "not-registered"}, "target_not_registry_approved"),
-        ({"parameters": {}}, "missing_authorized_parameters"),
+        ({"parameters": {}}, "missing_authorized_target_revision"),
     ],
 )
 def test_adversarial_stored_decisions_are_refused(overrides, expected):
@@ -89,17 +91,14 @@ def test_replay_of_the_same_decision_derives_the_same_key():
         target_ref="dispatch-web",
         decision_id=DECISION,
     )
-    assert derive_idempotency_key(**args) == derive_idempotency_key(**args)
-    assert derive_idempotency_key(**args) != derive_idempotency_key(
-        **args, attempt_intent=2
-    )
+    assert derive_execution_id(**args) == derive_execution_id(**args)
 
 
-def test_attempt_intent_is_bounded():
+def test_no_retry_field_exists_on_the_request():
+    """A caller must not be able to declare a new attempt."""
+    assert "attempt_intent" not in ExecuteRequest.model_fields
     with pytest.raises(ValidationError):
-        request(attempt_intent=0)
-    with pytest.raises(ValidationError):
-        request(attempt_intent=101)
+        ExecuteRequest(incident_id=INCIDENT, decision_id=DECISION, attempt_intent=2)
 
 
 def test_executor_does_not_certify_its_own_success():

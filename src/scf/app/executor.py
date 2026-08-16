@@ -2,13 +2,18 @@
 
 Runs as sa-executor. Being able to *call* this service is not authorization to
 mutate anything: the caller supplies only identifiers, and the executor loads
-the authoritative decision from Firestore itself. A caller cannot assert
-AUTO_ALLOWED, cannot change the target, and cannot change the action.
+the authoritative decision from Firestore itself.
+
+Honest property: this is duplicate-safe, recoverable, effect-idempotent
+execution with reconciliation. It is NOT globally exactly-once distributed
+execution — Firestore and the Cloud Run Admin API cannot be committed
+together. A crashed execution is resolved by inspecting real infrastructure.
 """
 
 from __future__ import annotations
 
 import os
+import uuid
 from functools import lru_cache
 from typing import Any
 
@@ -16,19 +21,21 @@ from fastapi import FastAPI, Header
 from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel, ConfigDict, Field
 
-from scf.domain.enums import ActionState, ActionType, Decision
-from scf.domain.ids import derive_idempotency_key, new_action_id, utc_now
+from scf.domain.enums import ActionState, ActionType, Decision, ExecutionState
+from scf.domain.ids import derive_execution_id, new_action_id, utc_now
 from scf.domain.models import ActionRecord
 from scf.executor.cloud_run import flip_traffic_to_revision
 from scf.obs import log_event, trace_id_from_header
 from scf.policy import default_policy, default_registry
-from scf import config
 from scf.state import DecisionNotFound, ExecutionStore, IncidentRepository
+from scf.state.execution_store import ALREADY_FINISHED, HELD_BY_OTHER
+from scf.tools.cloud_run_evidence import describe_service, probe_health
 
-app = FastAPI(title="SCF Remediation Executor", version="0.4.0")
+app = FastAPI(title="SCF Remediation Executor", version="0.5.0")
 
 EXECUTOR_IDENTITY = "sa-executor"
 EXECUTABLE = {Decision.AUTO_ALLOWED.value, "APPROVED"}
+WORKER_ID = f"{os.environ.get('K_REVISION', 'local')}:{uuid.uuid4().hex[:8]}"
 
 
 @lru_cache(maxsize=1)
@@ -43,17 +50,28 @@ def execution() -> ExecutionStore:
 
 
 class ExecuteRequest(BaseModel):
-    """Identifiers only. Deliberately carries no authorization claim."""
+    """Identifiers only.
+
+    There is deliberately no attempt or retry field. One authoritative decision
+    has exactly one execution identity, so no caller input can mint a second
+    infrastructure execution for the same authorization. A genuine retry is
+    driven by authoritative recovery state, not by a caller-chosen value.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
     incident_id: str = Field(min_length=3)
     decision_id: str = Field(min_length=3)
-    attempt_intent: int = Field(default=1, ge=1, le=100)
 
 
 def _refuse(reason: str, **fields: Any) -> dict[str, Any]:
-    return {"executed": False, "mutated": False, "refused": True, "reason": reason, **fields}
+    return {
+        "executed": False,
+        "mutated": False,
+        "refused": True,
+        "reason": reason,
+        **fields,
+    }
 
 
 @app.get("/health")
@@ -63,6 +81,7 @@ def health() -> dict[str, Any]:
         "service": "scf-executor",
         "role": "executor",
         "identity": EXECUTOR_IDENTITY,
+        "worker": WORKER_ID,
         "revision": os.environ.get("K_REVISION"),
     }
 
@@ -80,14 +99,30 @@ def _validate(decision: dict[str, Any], request: ExecuteRequest) -> str | None:
         return "action_type_not_in_closed_enum"
     if action_type != ActionType.FLIP_TRAFFIC_TO_LAST_GOOD.value:
         return f"unsupported_action_type:{action_type}"
-    target = decision.get("target_ref")
-    if target not in default_policy().targets:
+    if decision.get("target_ref") not in default_policy().targets:
         return "target_not_registry_approved"
     if not default_registry().allows_tool("executor", "flip_traffic_to_last_good"):
         return "executor_tool_not_permitted"
-    if not (decision.get("parameters") or {}).get("target_revision"):
-        return "missing_authorized_parameters"
+    if not (decision.get("parameters") or {}).get("authorized_target_revision"):
+        return "missing_authorized_target_revision"
     return None
+
+
+def _observe(service: str) -> dict[str, Any]:
+    """Read real infrastructure. Used for both precondition and reconciliation."""
+    described = describe_service(service)
+    active = ""
+    for entry in described.get("trafficStatuses") or []:
+        if entry.get("percent") == 100:
+            active = (entry.get("revision") or "").rsplit("/", 1)[-1]
+            break
+    status_code, body = probe_health(described.get("uri", ""))
+    return {
+        "active_revision": active,
+        "etag": described.get("etag", ""),
+        "http_status": status_code,
+        "healthy": status_code == 200 and "healthy" in body.lower(),
+    }
 
 
 @app.post("/execute")
@@ -104,7 +139,7 @@ async def execute(
         trace_id=trace_id,
         incident_id=request.incident_id,
         decision_id=request.decision_id,
-        attempt_intent=request.attempt_intent,
+        worker=WORKER_ID,
     )
 
     try:
@@ -112,13 +147,6 @@ async def execute(
             repo.get_decision, request.incident_id, request.decision_id
         )
     except DecisionNotFound:
-        log_event(
-            "execution_refused",
-            severity="WARNING",
-            trace_id=trace_id,
-            incident_id=request.incident_id,
-            reason="decision_not_found",
-        )
         return _refuse("decision_not_found", decision_id=request.decision_id)
 
     problem = _validate(decision, request)
@@ -133,77 +161,161 @@ async def execute(
         )
         return _refuse(problem, decision_id=request.decision_id)
 
-    action_type = decision["action_type"]
+    params = decision["parameters"]
     target_ref = decision["target_ref"]
-    target_revision = decision["parameters"]["target_revision"]
+    authorized_revision = params["authorized_target_revision"]
+    expected_source = params.get("expected_source_revision")
+    expected_etag = params.get("expected_etag")
 
-    key = derive_idempotency_key(
+    execution_id = derive_execution_id(
         incident_id=request.incident_id,
-        action_type=action_type,
+        action_type=decision["action_type"],
         target_ref=target_ref,
         decision_id=request.decision_id,
-        attempt_intent=request.attempt_intent,
     )
-    action_id = new_action_id()
 
-    # Claimed in the EXECUTION database. The executor has no write access to
-    # the authoritative database and no delete access here, so a claim can
-    # neither be forged nor retracted to permit a replay.
-    claimed = await run_in_threadpool(
-        store.claim_idempotency,
-        key,
+    outcome, existing = await run_in_threadpool(
+        store.acquire,
+        execution_id,
+        owner=WORKER_ID,
         incident_id=request.incident_id,
         decision_id=request.decision_id,
-        action_id=action_id,
+        action_type=decision["action_type"],
+        target_ref=target_ref,
+        authorized_target_revision=authorized_revision,
+        expected_source_revision=expected_source,
+        expected_etag=expected_etag,
     )
 
-    if not claimed:
+    base: dict[str, Any] = {
+        "execution_id": execution_id,
+        "authorized_target_revision": authorized_revision,
+        "execution_database": store.database,
+        "authoritative_database": repo.database,
+        "outcome": outcome,
+    }
+
+    if outcome in (ALREADY_FINISHED, HELD_BY_OTHER):
         log_event(
             "execution_duplicate_suppressed",
             trace_id=trace_id,
             incident_id=request.incident_id,
             decision_id=request.decision_id,
-            idempotency_key=key[:16],
-            execution_database=store.database,
+            outcome=outcome,
+            state=(existing or {}).get("state"),
         )
         return {
             "executed": False,
             "mutated": False,
             "duplicate": True,
-            "state": ActionState.DUPLICATE_SUPPRESSED.value,
-            "idempotency_key": key,
-            "execution_database": store.database,
+            "state": (existing or {}).get(
+                "state", ActionState.DUPLICATE_SUPPRESSED.value
+            ),
+            **base,
         }
 
+    # Reconcile against real infrastructure before touching anything. This is
+    # what closes the crash window: we never assume what a dead process did.
+    observed = await run_in_threadpool(_observe, target_ref)
+    base["observed_active_revision"] = observed["active_revision"]
+
+    if observed["active_revision"] == authorized_revision:
+        # CASE B: the mutation already landed, possibly before a crash.
+        await run_in_threadpool(
+            store.advance,
+            execution_id,
+            ExecutionState.MUTATED,
+            reconciled=True,
+            observed_active_revision=observed["active_revision"],
+        )
+        log_event(
+            "execution_reconciled_no_mutation",
+            trace_id=trace_id,
+            incident_id=request.incident_id,
+            execution_id=execution_id,
+            active_revision=observed["active_revision"],
+        )
+        return {
+            "executed": True,
+            "mutated": False,
+            "duplicate": False,
+            "reconciled": True,
+            "state": ExecutionState.MUTATED.value,
+            **base,
+        }
+
+    if expected_source and observed["active_revision"] != expected_source:
+        # CASE C: infrastructure is neither the authorized pre-state nor the
+        # target. Something else changed it. Fail closed.
+        await run_in_threadpool(
+            store.advance,
+            execution_id,
+            ExecutionState.STALE,
+            observed_active_revision=observed["active_revision"],
+        )
+        log_event(
+            "execution_precondition_failed",
+            severity="WARNING",
+            trace_id=trace_id,
+            incident_id=request.incident_id,
+            execution_id=execution_id,
+            expected_source_revision=expected_source,
+            observed_active_revision=observed["active_revision"],
+        )
+        return _refuse(
+            "STALE_EVIDENCE",
+            precondition="expected_source_revision",
+            expected=expected_source,
+            observed=observed["active_revision"],
+            **base,
+        )
+
+    if expected_etag and observed["etag"] and observed["etag"] != expected_etag:
+        log_event(
+            "execution_etag_drift",
+            severity="NOTICE",
+            trace_id=trace_id,
+            incident_id=request.incident_id,
+            execution_id=execution_id,
+        )
+        base["etag_drift"] = True
+
+    action_id = new_action_id()
     action = ActionRecord(
         action_id=action_id,
         decision_id=request.decision_id,
-        action_type=ActionType(action_type),
+        action_type=ActionType(decision["action_type"]),
         target_ref=target_ref,
-        idempotency_key=key,
+        idempotency_key=execution_id,
         state=ActionState.EXECUTING,
-        attempt_intent=request.attempt_intent,
         executor_identity=EXECUTOR_IDENTITY,
         started_at=utc_now(),
     )
     await run_in_threadpool(
-        store.record_receipt,
-        action_id,
-        {**action.model_dump(mode="json"), "incident_id": request.incident_id},
+        store.advance,
+        execution_id,
+        ExecutionState.MUTATION_REQUESTED,
+        action_id=action_id,
+        observed_etag=observed["etag"],
     )
 
     result = await run_in_threadpool(
-        flip_traffic_to_revision, target_ref, target_revision
+        flip_traffic_to_revision, target_ref, authorized_revision
     )
 
-    action.state = ActionState.SUCCEEDED if result.get("accepted") else ActionState.FAILED
+    accepted = bool(result.get("accepted"))
+    action.state = ActionState.SUCCEEDED if accepted else ActionState.FAILED
     action.result = result
-    action.error = None if result.get("accepted") else str(result.get("error"))[:400]
+    action.error = None if accepted else str(result.get("error"))[:400]
     action.finished_at = utc_now()
 
-    # The receipt lands in the execution plane. The orchestrator, which is an
-    # authoritative writer, records the action and audit entry in the control
-    # plane from what is returned below.
+    await run_in_threadpool(
+        store.advance,
+        execution_id,
+        ExecutionState.MUTATED if accepted else ExecutionState.FAILED,
+        action_id=action_id,
+        accepted=accepted,
+    )
     await run_in_threadpool(
         store.record_receipt,
         action_id,
@@ -214,22 +326,20 @@ async def execute(
         "action_executed",
         trace_id=trace_id,
         incident_id=request.incident_id,
-        decision_id=request.decision_id,
+        execution_id=execution_id,
         target_ref=target_ref,
-        target_revision=target_revision,
-        changed=bool(result.get("accepted")),
+        authorized_target_revision=authorized_revision,
+        accepted=accepted,
     )
 
     return {
         "executed": True,
-        "mutated": bool(result.get("accepted")),
+        "mutated": accepted,
         "duplicate": False,
-        "action_id": action.action_id,
+        "reconciled": False,
+        "action_id": action_id,
         "state": action.state.value,
-        "idempotency_key": key,
-        "target_revision": target_revision,
         "result": result,
         "action": action.model_dump(mode="json"),
-        "execution_database": store.database,
-        "authoritative_database": repo.database,
+        **base,
     }

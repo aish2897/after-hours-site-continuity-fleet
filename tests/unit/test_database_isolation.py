@@ -31,7 +31,8 @@ def test_config_fails_closed_when_a_plane_is_missing(monkeypatch, blank):
 
 def test_idempotency_lives_only_in_the_execution_plane():
     """The claim must not be writable in the database holding authorization."""
-    assert hasattr(execution_store.ExecutionStore, "claim_idempotency")
+    assert hasattr(execution_store.ExecutionStore, "acquire")
+    assert not hasattr(firestore_repo.IncidentRepository, "acquire")
     assert not hasattr(firestore_repo.IncidentRepository, "claim_idempotency")
 
 
@@ -75,7 +76,7 @@ def test_executor_reads_authority_and_writes_only_receipts():
     # Authority is read from the authoritative plane.
     assert "repo.get_decision" in source
     # Claims and receipts go to the execution plane.
-    assert "store.claim_idempotency" in source
+    assert "store.acquire" in source
     assert "store.record_receipt" in source
     # The executor must never write the control plane.
     for forbidden in ("repo.append_audit", "repo.save_decision", "repo.record_action"):

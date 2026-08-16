@@ -1,5 +1,5 @@
 {
-  "policy_version": "1.0.0",
+  "policy_version": "1.1.0",
   "description": "Deterministic authorization policy. This file is the single source of truth. If a rule is not here, it is not a rule. Evaluated only against TRUSTED_TOOL evidence.",
   "targets": {
     "dispatch-web": {
@@ -29,10 +29,11 @@
       "target_type": "cloud_run_service_non_critical",
       "decision": "AUTO_ALLOWED",
       "reason_code": "LOW_RISK_TRAFFIC_FLIP",
-      "reason": "Shifting traffic back to a known-good revision of a non-critical service is reversible and does not alter data.",
+      "reason": "Shifting traffic to an operator-approved revision that was independently probed healthy is reversible and does not alter data.",
       "required_evidence": {
         "service_unhealthy": true,
-        "last_good_revision_exists": true
+        "candidate_revision_approved": true,
+        "candidate_probe_healthy": true
       }
     },
     {
