@@ -12,7 +12,13 @@ from scf import config
 from scf.app.invoke import call_service
 from scf.domain.enums import Decision, IncidentStatus, SpecialistName, TrustLevel
 from scf.domain.ids import new_incident_id
-from scf.domain.models import Evidence, IncidentDoc, IncidentReport, Proposal
+from scf.domain.models import (
+    ActionRecord,
+    Evidence,
+    IncidentDoc,
+    IncidentReport,
+    Proposal,
+)
 from scf.obs import log_event, trace_id_from_header
 from scf.policy import evaluate, trusted_evidence_map
 from scf.state import IncidentNotFound, IncidentRepository
@@ -265,9 +271,50 @@ async def _autonomous_remediation(
         trace_header=trace_header,
     )
     execution.raise_for_status()
-    outcome["execution"] = execution.json()
+    receipt = execution.json()
+    outcome["execution"] = receipt
 
-    if not outcome["execution"].get("mutated"):
+    # The executor cannot write the control plane. The orchestrator, which is
+    # an authoritative writer, records what the executor reported.
+    if receipt.get("duplicate"):
+        await run_in_threadpool(
+            repo.append_audit,
+            incident_id,
+            actor="executor",
+            event="duplicate_suppressed",
+            payload={
+                "decision_id": policy_decision.decision_id,
+                "idempotency_key": receipt.get("idempotency_key"),
+                "execution_database": receipt.get("execution_database"),
+            },
+            actor_identity="sa-executor",
+            trace_id=trace_id,
+        )
+    elif receipt.get("action"):
+        await run_in_threadpool(
+            repo.record_action,
+            incident_id,
+            ActionRecord.model_validate(receipt["action"]),
+        )
+        await run_in_threadpool(
+            repo.append_audit,
+            incident_id,
+            actor="executor",
+            event="action_executed",
+            payload={
+                "action_id": receipt["action"].get("action_id"),
+                "decision_id": policy_decision.decision_id,
+                "target_ref": receipt["action"].get("target_ref"),
+                "target_revision": receipt.get("target_revision"),
+                "accepted": bool(receipt.get("mutated")),
+                "idempotency_key": receipt.get("idempotency_key"),
+                "execution_database": receipt.get("execution_database"),
+            },
+            actor_identity="sa-executor",
+            trace_id=trace_id,
+        )
+
+    if not receipt.get("mutated"):
         await run_in_threadpool(
             repo.transition, incident_id, IncidentStatus.EXECUTION_FAILED, trace_id=trace_id
         )

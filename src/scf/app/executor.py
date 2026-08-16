@@ -22,8 +22,8 @@ from scf.domain.models import ActionRecord
 from scf.executor.cloud_run import flip_traffic_to_revision
 from scf.obs import log_event, trace_id_from_header
 from scf.policy import default_policy, default_registry
-from scf.state import IncidentRepository
-from scf.state.firestore_repo import DecisionNotFound
+from scf import config
+from scf.state import DecisionNotFound, ExecutionStore, IncidentRepository
 
 app = FastAPI(title="SCF Remediation Executor", version="0.4.0")
 
@@ -32,8 +32,14 @@ EXECUTABLE = {Decision.AUTO_ALLOWED.value, "APPROVED"}
 
 
 @lru_cache(maxsize=1)
-def repository() -> IncidentRepository:
+def authoritative() -> IncidentRepository:
+    """Read-only here. IAM refuses writes; this is not enforced in code."""
     return IncidentRepository()
+
+
+@lru_cache(maxsize=1)
+def execution() -> ExecutionStore:
+    return ExecutionStore()
 
 
 class ExecuteRequest(BaseModel):
@@ -90,7 +96,8 @@ async def execute(
     x_cloud_trace_context: str | None = Header(default=None),
 ) -> dict[str, Any]:
     trace_id = trace_id_from_header(x_cloud_trace_context)
-    repo = repository()
+    repo = authoritative()
+    store = execution()
 
     log_event(
         "execution_requested",
@@ -139,8 +146,11 @@ async def execute(
     )
     action_id = new_action_id()
 
+    # Claimed in the EXECUTION database. The executor has no write access to
+    # the authoritative database and no delete access here, so a claim can
+    # neither be forged nor retracted to permit a replay.
     claimed = await run_in_threadpool(
-        repo.claim_idempotency,
+        store.claim_idempotency,
         key,
         incident_id=request.incident_id,
         decision_id=request.decision_id,
@@ -154,15 +164,7 @@ async def execute(
             incident_id=request.incident_id,
             decision_id=request.decision_id,
             idempotency_key=key[:16],
-        )
-        await run_in_threadpool(
-            repo.append_audit,
-            request.incident_id,
-            actor="executor",
-            event="duplicate_suppressed",
-            payload={"decision_id": request.decision_id, "idempotency_key": key},
-            actor_identity=EXECUTOR_IDENTITY,
-            trace_id=trace_id,
+            execution_database=store.database,
         )
         return {
             "executed": False,
@@ -170,6 +172,7 @@ async def execute(
             "duplicate": True,
             "state": ActionState.DUPLICATE_SUPPRESSED.value,
             "idempotency_key": key,
+            "execution_database": store.database,
         }
 
     action = ActionRecord(
@@ -183,7 +186,11 @@ async def execute(
         executor_identity=EXECUTOR_IDENTITY,
         started_at=utc_now(),
     )
-    await run_in_threadpool(repo.record_action, request.incident_id, action)
+    await run_in_threadpool(
+        store.record_receipt,
+        action_id,
+        {**action.model_dump(mode="json"), "incident_id": request.incident_id},
+    )
 
     result = await run_in_threadpool(
         flip_traffic_to_revision, target_ref, target_revision
@@ -193,22 +200,14 @@ async def execute(
     action.result = result
     action.error = None if result.get("accepted") else str(result.get("error"))[:400]
     action.finished_at = utc_now()
-    await run_in_threadpool(repo.record_action, request.incident_id, action)
+
+    # The receipt lands in the execution plane. The orchestrator, which is an
+    # authoritative writer, records the action and audit entry in the control
+    # plane from what is returned below.
     await run_in_threadpool(
-        repo.append_audit,
-        request.incident_id,
-        actor="executor",
-        event="action_executed",
-        payload={
-            "action_id": action.action_id,
-            "decision_id": request.decision_id,
-            "target_ref": target_ref,
-            "target_revision": target_revision,
-            "accepted": bool(result.get("accepted")),
-            "idempotency_key": key,
-        },
-        actor_identity=EXECUTOR_IDENTITY,
-        trace_id=trace_id,
+        store.record_receipt,
+        action_id,
+        {**action.model_dump(mode="json"), "incident_id": request.incident_id},
     )
 
     log_event(
@@ -230,4 +229,7 @@ async def execute(
         "idempotency_key": key,
         "target_revision": target_revision,
         "result": result,
+        "action": action.model_dump(mode="json"),
+        "execution_database": store.database,
+        "authoritative_database": repo.database,
     }
