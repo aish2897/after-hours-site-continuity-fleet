@@ -49,6 +49,13 @@ capability beyond the state recorded here.
 | Executor rejects forged authority | **`VERIFIED`** | [`gate-d`](docs/evidence/gate-d-autonomous-recovery.md) |
 | Executor cannot write authorization state | **`VERIFIED`** | [`gate-d1`](docs/evidence/gate-d1-executor-firestore-isolation.md) |
 | Two-plane Firestore isolation (IAM-conditioned) | **`VERIFIED`** | [`gate-d1`](docs/evidence/gate-d1-executor-firestore-isolation.md) |
+| Decision-bound execution identity (no caller retry field) | **`VERIFIED`** | [`gate-d2`](docs/evidence/gate-d2-execution-correctness.md) |
+| Datastore-atomic ownership under 10-way concurrency | **`VERIFIED`** | [`gate-d2`](docs/evidence/gate-d2-execution-correctness.md) |
+| Reconciliation after crash (no second mutation) | **`VERIFIED`** | [`gate-d2`](docs/evidence/gate-d2-execution-correctness.md) |
+| Proven known-good candidate (tag + direct probe) | **`VERIFIED`** | [`gate-d2`](docs/evidence/gate-d2-execution-correctness.md) |
+| Exact authorized revision pinned and verified | **`VERIFIED`** | [`gate-d2`](docs/evidence/gate-d2-execution-correctness.md) |
+| Stale-evidence precondition fails closed | **`VERIFIED`** | [`gate-d2`](docs/evidence/gate-d2-execution-correctness.md) |
+| State + audit committed in one transaction | **`VERIFIED`** | [`gate-d2`](docs/evidence/gate-d2-execution-correctness.md) |
 | Deterministic policy gate | `IMPLEMENTED` | `tests/policy/test_decision_matrix.py` — 26 |
 | Agent capability registry | `IMPLEMENTED` | `tests/policy/test_registry.py` — 9 |
 | Incident state machine | `IMPLEMENTED` | `tests/unit/test_state_machine.py` — 15 |
@@ -62,10 +69,18 @@ capability beyond the state recorded here.
 | Network / Security / Continuity runtimes | `NOT INTEGRATED` | systems only so far |
 | Duty-manager UI | `NOT INTEGRATED` | — |
 
-Boundaries of the claim: durable persistence is proven, **resumability is
-not** — no interrupted workflow resumes yet. Cloud Logging entries share a
-trace id across all four services, but **no span has been exported to Cloud
-Trace**. One investigator exists; the other three are contracts only.
+Boundaries of the claim, stated precisely:
+
+- Execution is **duplicate-safe, recoverable and effect-idempotent with
+  reconciliation** — *not* globally exactly-once distributed execution.
+  Firestore and the Cloud Run Admin API cannot be committed together.
+- Audit is **tamper-evident, not immutable**.
+- Durable persistence is proven; **crash-resumable workflow is not**.
+- Cloud Logging entries share a trace id across all four services, but **no
+  span has been exported to Cloud Trace**.
+- **Model Armor is not integrated**, so no prompt-injection resistance is
+  claimed — only that untrusted content cannot reach an authorization path.
+- One investigator is deployed; the other three are contracts only.
 
 See [`STATUS.md`](STATUS.md) for the current phase and next gate.
 
@@ -83,7 +98,7 @@ See [`STATUS.md`](STATUS.md) for the current phase and next gate.
 | Concern | Location |
 |---|---|
 | Cloud Run, Firestore, Artifact Registry | Sydney `australia-southeast1` |
-| Model Armor inspection | Melbourne `australia-southeast2` |
+| Model Armor inspection *(PLANNED, not integrated)* | Melbourne `australia-southeast2` |
 | Gemini 3.7 Flash inference | `global` |
 
 Authoritative incident state, audit records, and privileged execution remain on

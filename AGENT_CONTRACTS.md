@@ -104,5 +104,8 @@ own work.
 
 ## Audit
 
-Append-only hash-chained writer. Editing a historical record is not prohibited
-by policy alone — it breaks the chain and `verify_chain()` reports where.
+Append-only hash-chained writer, **tamper-evident, not immutable**. Editing a
+historical record is not prevented — it breaks the chain and `verify_chain()`
+reports where. A compromised authoritative writer could rewrite the chain and
+its tail hash together; detecting that needs an external witness we do not
+have.

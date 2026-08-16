@@ -1,6 +1,6 @@
 # STATUS
 
-CURRENT PHASE: Gate D.1 complete
+CURRENT PHASE: Gate D.2 complete
 
 WED AUG 19 — FULL AUTONOMOUS SLICE: VERIFIED
 (achieved 2026-08-15, ahead of the wall-plan date)
@@ -31,10 +31,22 @@ Real execution proof exists in `docs/evidence/`.
 - **Two-plane Firestore isolation: executor is read-only on the authoritative
   database and append-only on the execution database, enforced by per-database
   IAM conditions. It holds no project-level datastore role.**
+- **Decision-bound execution identity: no caller field can create a second
+  execution for the same authorization**
+- **Datastore-atomic ownership proven under 10 concurrent requests: one
+  owner, one mutation**
+- **Reconciliation after crash: re-delivery observes the authorized target
+  already active and does not mutate again**
+- **Known-good candidate proven by operator tag plus direct probe, never
+  inferred from being inactive**
+- **Exact authorized revision pinned; HTTP 200 from the wrong revision does
+  not resolve**
+- **Stale-evidence precondition fails closed with no mutation**
+- **State transition and audit record committed in one Firestore transaction**
 
 ## IN PROGRESS
 
-Nothing. Gate D.1 is closed.
+Nothing. Gate D.2 is closed.
 
 ## NOT STARTED
 
@@ -48,6 +60,18 @@ Nothing. Gate D.1 is closed.
 - Duty-manager UI
 - Evaluation suite
 - Additional Google models / bonus categories
+
+## HONEST LIMITATIONS
+
+- Execution is duplicate-safe, recoverable and effect-idempotent with
+  reconciliation. It is NOT globally exactly-once distributed execution.
+- Audit is tamper-evident, NOT immutable.
+- Firestore isolation is database-level, NOT collection-level.
+- Cloud Run v2 does not accept the service etag as an enforced update
+  precondition on our call; the compare-before-update guard is
+  expected_source_revision.
+- No prompt-injection resistance is claimed. Model Armor is not integrated.
+- No Cloud Trace spans exist.
 
 ## NEXT HARD GATE
 

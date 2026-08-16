@@ -30,7 +30,7 @@ vendor.
 - Check required evidence.
 - Enforce allow / deny / approval policy.
 - Apply idempotency.
-- Write immutable audit records.
+- Write tamper-evident audit records.
 
 Identity does the rest: the only component that can mutate infrastructure is a
 service account whose IAM role is scoped to one Cloud Run service.
@@ -81,7 +81,7 @@ boundary instead of a naming convention.
 | Concern | Location | Why |
 |---|---|---|
 | Cloud Run, Firestore, Artifact Registry | Sydney `australia-southeast1` | Authoritative state and privileged execution stay in Australia |
-| Model Armor inspection | Melbourne `australia-southeast2` | No Sydney region; nearest Australian region |
+| Model Armor inspection *(PLANNED)* | Melbourne `australia-southeast2` | No Sydney region; nearest Australian region |
 | Gemini 3.7 Flash inference | `global` | No Australian inference endpoint published |
 
 Model Armor is not offered in Sydney, so security inspection makes a deliberate
@@ -108,8 +108,12 @@ Because inference leaves the country, the classification and security boundary
 is load-bearing rather than decorative: untrusted incident content is inspected
 by Model Armor in Melbourne *before* it reaches an agent or a tool, and
 sensitive or policy-restricted content must never be silently forwarded to the
-global endpoint. That boundary is what makes the split defensible; without it,
-the design would simply be leaking.
+global endpoint.
+
+**Status: PLANNED.** Model Armor is NOT integrated. Until it is, the boundary
+that actually holds is the trust-level separation: untrusted report text is
+recorded as `UNTRUSTED_INPUT` and can never satisfy a policy condition. No
+prompt-injection resistance is claimed.
 
 ## State — two planes
 
@@ -132,9 +136,11 @@ see `SECURITY.md`.
 
 Firestore is the authoritative incident and audit store.
 
-- `incidents/{id}` — aggregate root with an explicit 17-state machine.
-- `/evidence`, `/proposals`, `/decisions`, `/actions`, `/audit` subcollections.
-- `idempotency/{key}` — global claim documents.
+- `(default)`: `incidents/{id}` aggregate root with an explicit 17-state
+  machine, plus `/evidence`, `/decisions`, `/actions`, `/audit` subcollections.
+  The incident document also carries `audit_seq` and `audit_tail_hash`.
+- `execution-state`: `executions/{execution_id}` lifecycle documents and
+  `receipts/{action_id}`.
 
 Transitions are compare-and-set inside a transaction against a declared legal
 transition table (`src/scf/domain/state_machine.py`). An illegal transition
@@ -144,17 +150,35 @@ raises and is audited. `EXECUTING` is reachable only from `AUTO_ALLOWED` or
 ## Idempotency
 
 ```
-sha256(incident_id | action_type | target_ref | decision_id | attempt_intent)
+sha256(incident_id | action_type | target_ref | decision_id)
 ```
 
-Derived from the authorizing decision, so re-delivery of the same approved
-decision collapses to exactly one execution. A deliberate retry supplies a new
-`attempt_intent`. The claim is made with a Firestore `create()` inside a
-transaction — failure to create *is* the duplicate signal.
+One authoritative decision has exactly one execution identity. **Nothing a
+caller supplies participates in the derivation**, so no request field can mint
+a second infrastructure execution for the same authorization. An earlier design
+mixed in a caller-supplied `attempt_intent`, which meant any client able to
+reach the executor could re-run a completed mutation.
+
+Ownership is taken with a Firestore transaction that either creates the
+execution document or takes over an expired lease. Exactly one worker holds a
+live lease; a duplicate arriving while it is held is refused.
+
+### What is and is not claimed
+
+Firestore and the Cloud Run Admin API cannot be committed together, so this is
+**not** globally exactly-once distributed execution. The honest property is
+**duplicate-safe, recoverable, effect-idempotent execution with
+reconciliation**: before mutating, the executor re-reads real infrastructure
+and either finds the authorized target already active (reconcile, do not
+mutate), finds the authorized source state (proceed), or finds neither and
+fails closed as `STALE_EVIDENCE`.
+
+Execution documents are never deleted, and the executor holds no delete
+permission, so a claim cannot be retracted to manufacture a retry.
 
 Pub/Sub is deliberately excluded from the MVP. Replay proof is performed by
 delivering the same execution request three times and showing exactly one
-mutation.
+mutation, measured by the Cloud Run service generation counter.
 
 ## Audit
 
@@ -167,9 +191,13 @@ as a limitation in `SECURITY.md` rather than hidden.
 ## Observability
 
 One OpenTelemetry trace per incident, spanning intake → orchestrator →
-investigator → policy → executor → verifier, exported to Cloud Trace. The
-`trace_id` is stored on the incident document so the audit trail and the trace
-can be correlated from either direction.
+investigator → policy → executor → verifier.
+
+**Status: structured Cloud Logging correlation only.** Every service emits JSON
+entries carrying the same `trace_id`, and the `trace_id` is stored on the
+incident document so the audit trail and the logs can be correlated from either
+direction. **No span has been exported to Cloud Trace.** OpenTelemetry export is
+PLANNED, not integrated.
 
 ## Out of scope until slice 1 is verified
 

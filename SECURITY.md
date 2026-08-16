@@ -57,8 +57,8 @@ The Remediation Executor holds a custom role, `scfRemediator`, bound **only on
 the `dispatch-web` service resource**. A fully compromised executor still
 cannot touch any other Cloud Run service.
 
-Three IAM proofs are required before this section may claim to be verified.
-See `infra/iam-matrix.md`.
+All three IAM proofs are captured. See `infra/iam-matrix.md` and
+`docs/evidence/gate-c-iam-boundary.md`.
 
 ## Known limitations
 
@@ -89,8 +89,15 @@ Stated plainly rather than implied away.
    AI's `global` endpoint. Model Armor inspection additionally crosses from
    Sydney to Melbourne, though that leg stays within Australia. See the data
    handling section below.
-4. **No capability is claimed before its evidence exists.** Every Google Cloud
-   row in the README integration table currently reads `NOT INTEGRATED`.
+4. **Audit is tamper-evident, not immutable.** The chain detects edits, but a
+   compromised authoritative writer could rewrite a record and the incident's
+   `audit_tail_hash` together. Detecting that needs an external witness we do
+   not have.
+5. **Execution is not globally exactly-once.** Firestore and the Cloud Run
+   Admin API cannot be committed together. The claim is duplicate-safe,
+   recoverable, effect-idempotent execution with reconciliation.
+6. **No capability is claimed before its evidence exists.** The README
+   integration table is authoritative for what is and is not integrated.
 
 ## Data handling and processing location
 
@@ -103,14 +110,14 @@ residency is therefore not claimed.**
 | Concern | Location |
 |---|---|
 | Cloud Run, Firestore, Artifact Registry | Sydney `australia-southeast1` |
-| Model Armor inspection | Melbourne `australia-southeast2` |
+| Model Armor inspection *(PLANNED, not integrated)* | Melbourne `australia-southeast2` |
 | Gemini 3.7 Flash inference | `global` |
 
 Because inference leaves the country, the classification and security boundary
-is load-bearing rather than decorative. Untrusted incident content is inspected
-by Model Armor before it reaches an agent or a tool, and sensitive or
-policy-restricted content must never be silently forwarded to the global
-endpoint.
+is load-bearing rather than decorative. The boundary that exists today is the
+trust-level separation described above. **Model Armor inspection is PLANNED and
+not integrated**, so no prompt-injection resistance is claimed — only that
+untrusted content cannot reach an authorization path.
 
 Synthetic company, sites, users, services, and logs only. No employer data,
 code, names, policies, addresses, configurations, or IP. Personal Google Cloud
