@@ -1,6 +1,6 @@
 # STATUS
 
-CURRENT PHASE: Gate D.2 complete
+CURRENT PHASE: Gate D.3 complete
 
 WED AUG 19 — FULL AUTONOMOUS SLICE: VERIFIED
 (achieved 2026-08-15, ahead of the wall-plan date)
@@ -43,10 +43,26 @@ Real execution proof exists in `docs/evidence/`.
   not resolve**
 - **Stale-evidence precondition fails closed with no mutation**
 - **State transition and audit record committed in one Firestore transaction**
+- **Lease-epoch fencing: a stale owner cannot advance state, renew, or
+  terminalize — six real Firestore refusals after a takeover**
+- **Cloud Run v1 `resourceVersion` CAS: a stale snapshot is refused by Google
+  with HTTP 409 ABORTED and no traffic moves**
+- **Traffic-only mutation with zero configuration drift and no new revision**
+- **Ownership under 100 concurrent same-decision requests: one identity, one
+  epoch, zero extra mutations**
+- **Terminal `VERIFIED` execution: 100 replays, all suppressed, no mutation**
+- **Verifier-crash recovery: incident stays reconcilable, recovery terminalizes
+  without a blind second mutation**
+- **Partial traffic (50/50, 90/10) returning HTTP 200 is refused by the verifier**
+- **Candidate re-probed immediately before mutating; a stale candidate refuses
+  with `TARGET_NO_LONGER_HEALTHY` and no mutation**
+- **Audit truncation detected against the incident's own `audit_seq` and
+  `audit_tail_hash`**
+- **One authorization fingerprint binds to exactly one execution identity**
 
 ## IN PROGRESS
 
-Nothing. Gate D.2 is closed.
+Nothing. Gate D.3 is closed.
 
 ## NOT STARTED
 
@@ -63,13 +79,21 @@ Nothing. Gate D.2 is closed.
 
 ## HONEST LIMITATIONS
 
-- Execution is duplicate-safe, recoverable and effect-idempotent with
+- Execution is fenced, duplicate-safe, recoverable and effect-idempotent with
   reconciliation. It is NOT globally exactly-once distributed execution.
+- The stale-worker window is narrowed, not eliminated. A worker that lost its
+  lease after its final ownership check can still reach the Cloud Run API if
+  the service has not changed. It can only apply the same authorized effect and
+  cannot record having done so.
 - Audit is tamper-evident, NOT immutable.
 - Firestore isolation is database-level, NOT collection-level.
-- Cloud Run v2 does not accept the service etag as an enforced update
-  precondition on our call; the compare-before-update guard is
-  expected_source_revision.
+- Cloud Run v2 does NOT enforce the service etag on the traffic update — proven
+  live with a stale etag, a stale If-Match header and a bogus etag, all
+  accepted with 200. The executor therefore mutates through v1
+  replaceService, where resourceVersion IS enforced.
+- The authorization fingerprint stops an equivalent re-issued decision, not a
+  materially different forged one. Full control-plane compromise is not covered.
+- Candidate health is a point-in-time precondition, not a future guarantee.
 - No prompt-injection resistance is claimed. Model Armor is not integrated.
 - No Cloud Trace spans exist.
 
@@ -102,6 +126,9 @@ model          gemini-3.7-flash, Vertex AI, location=global
 model armor    australia-southeast2 (Melbourne), not integrated yet
 firestore      (default)        australia-southeast1  authoritative control plane
                execution-state  australia-southeast1  idempotency + receipts
+
+mutation api   serving.knative.dev/v1 namespaces.services.replaceService
+               with metadata.resourceVersion (v2 etag is NOT enforced)
 
 services       scf-orchestrator    sa-orchestrator
                scf-agent-systems   sa-agent-systems   (read-only)

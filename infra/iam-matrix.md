@@ -115,3 +115,25 @@ not merely to an identity. Proof D.1b matters most for integrity: the executor
 cannot author the authority it acts on.
 
 Transcripts: `gate-c-iam-boundary.md`, `gate-d1-executor-firestore-isolation.md`.
+
+## Gate D.3 — no IAM was changed
+
+Moving the mutation from Cloud Run v2 `services.patch` to v1
+`namespaces.services.replaceService` required **no additional permission**. The
+existing resource-scoped `scfRemediator` (`run.services.get`,
+`run.services.update` on `dispatch-web` only) covers both.
+
+Re-tested after the change, as the real `sa-executor`:
+
+| Attempt | Result |
+|---|---|
+| v1 `GET` `site-directory` | 403 `run.services.get` denied |
+| v1 `PUT` `site-directory` | 403 `run.services.update` denied |
+| v1 `GET` `dispatch-web` | 200 — the authorized target is still readable |
+| Firestore `(default)` read incident | 200 |
+| Firestore `(default)` create forged decision | 403 |
+| Firestore `(default)` patch incident status to RESOLVED | 403 |
+| Firestore `execution-state` delete execution record | 403 |
+
+Changing API version did not widen authority, and the Gate D.1 two-plane
+boundary is intact. Transcript: `gate-d3-lease-fencing-cas.md`.

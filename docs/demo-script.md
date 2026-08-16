@@ -56,8 +56,10 @@ hash-chained audit trail failing verification after a single record is edited.
 
 ## 3:20–4:00 — Google Cloud proof
 
-Cloud Run services and revisions, Firestore incident documents, one correlated
-Cloud Trace spanning the whole flow, repository, and architecture diagram.
+Cloud Run services and revisions, Firestore incident documents, the structured
+Cloud Logging entries that share one `trace_id` across all four services,
+repository, and architecture diagram. *(No span is exported to Cloud Trace —
+say "correlated logs", never "distributed tracing".)*
 
 Close on the honest residency line: authoritative state, audit records, and
 privileged execution stay on Australian infrastructure; model inference uses

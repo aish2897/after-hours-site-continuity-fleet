@@ -56,6 +56,16 @@ capability beyond the state recorded here.
 | Exact authorized revision pinned and verified | **`VERIFIED`** | [`gate-d2`](docs/evidence/gate-d2-execution-correctness.md) |
 | Stale-evidence precondition fails closed | **`VERIFIED`** | [`gate-d2`](docs/evidence/gate-d2-execution-correctness.md) |
 | State + audit committed in one transaction | **`VERIFIED`** | [`gate-d2`](docs/evidence/gate-d2-execution-correctness.md) |
+| Cloud Run v1 `resourceVersion` CAS (real 409 ABORTED) | **`VERIFIED`** | [`gate-d3a`](docs/evidence/gate-d3a-cloud-run-resourceversion-cas.md) · [`gate-d3`](docs/evidence/gate-d3-lease-fencing-cas.md) |
+| Lease-epoch fencing of a stale owner | **`VERIFIED`** | [`gate-d3`](docs/evidence/gate-d3-lease-fencing-cas.md) |
+| Ownership under 100-way same-decision concurrency | **`VERIFIED`** | [`gate-d3`](docs/evidence/gate-d3-lease-fencing-cas.md) |
+| Terminal execution state (replay cannot re-run) | **`VERIFIED`** | [`gate-d3`](docs/evidence/gate-d3-lease-fencing-cas.md) |
+| Verifier-crash recovery without blind re-mutation | **`VERIFIED`** | [`gate-d3`](docs/evidence/gate-d3-lease-fencing-cas.md) |
+| Partial-traffic rejection (50/50, 90/10) | **`VERIFIED`** | [`gate-d3`](docs/evidence/gate-d3-lease-fencing-cas.md) |
+| Traffic-only mutation, no revision or config drift | **`VERIFIED`** | [`gate-d3`](docs/evidence/gate-d3-lease-fencing-cas.md) |
+| Candidate re-probed immediately before mutating | **`VERIFIED`** | [`gate-d3`](docs/evidence/gate-d3-lease-fencing-cas.md) |
+| Audit truncation detected against incident tail metadata | **`VERIFIED`** | [`gate-d3`](docs/evidence/gate-d3-lease-fencing-cas.md) |
+| One authorization fingerprint → one execution identity | **`VERIFIED`** | [`gate-d3`](docs/evidence/gate-d3-lease-fencing-cas.md) |
 | Deterministic policy gate | `IMPLEMENTED` | `tests/policy/test_decision_matrix.py` — 26 |
 | Agent capability registry | `IMPLEMENTED` | `tests/policy/test_registry.py` — 9 |
 | Incident state machine | `IMPLEMENTED` | `tests/unit/test_state_machine.py` — 15 |
@@ -71,9 +81,18 @@ capability beyond the state recorded here.
 
 Boundaries of the claim, stated precisely:
 
-- Execution is **duplicate-safe, recoverable and effect-idempotent with
+- Execution is **fenced, duplicate-safe, recoverable and effect-idempotent with
   reconciliation** — *not* globally exactly-once distributed execution.
   Firestore and the Cloud Run Admin API cannot be committed together.
+- The **stale-worker window is narrowed, not eliminated**. A fenced worker
+  cannot advance execution state, and a stale Cloud Run snapshot is rejected by
+  Google with 409 ABORTED — but a worker that lost its lease after its final
+  ownership check can still reach the API if the service has not changed. It
+  can only apply the same authorized effect, and it cannot record having done
+  so. See [`SECURITY.md`](SECURITY.md).
+- **Cloud Run v2 `etag` is not a concurrency control** for the traffic update;
+  proven live. The executor mutates through v1 `replaceService`, where
+  `resourceVersion` is genuinely enforced.
 - Audit is **tamper-evident, not immutable**.
 - Durable persistence is proven; **crash-resumable workflow is not**.
 - Cloud Logging entries share a trace id across all four services, but **no

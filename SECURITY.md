@@ -79,9 +79,15 @@ Stated plainly rather than implied away.
    any collection; the boundary is that no authorization truth lives there.
    Proof: `docs/evidence/gate-d1-executor-firestore-isolation.md`.
 2. **Audit truncation leaves a valid prefix.** The hash chain detects edits,
-   reordering, deletion in the middle, and forged appends, but a reader must
-   also check the expected record count to detect a truncated tail. Covered by
-   `test_truncating_the_tail_is_detected_by_length`.
+   reordering, deletion in the middle, and forged appends, but a truncated tail
+   still links correctly. `verify_incident_chain()` therefore checks the trail
+   against the incident document's own `audit_seq` and `audit_tail_hash`,
+   written in the same transaction as each record, which detects a missing
+   tail, an unaccounted append, and a tail-hash mismatch. Covered by
+   `test_truncating_the_tail_is_detected_by_length` and
+   `test_incident_chain_verification_detects_a_truncated_tail`, and exercised
+   live against resolved incidents in
+   `docs/evidence/gate-d3-lease-fencing-cas.md`.
 3. **Model inference leaves Australia.** Gemini 3.7 Flash is not available
    through an Australian regional inference endpoint — Sydney returns
    `404 NOT_FOUND` for the publisher model, confirmed by a real call
@@ -94,10 +100,38 @@ Stated plainly rather than implied away.
    `audit_tail_hash` together. Detecting that needs an external witness we do
    not have.
 5. **Execution is not globally exactly-once.** Firestore and the Cloud Run
-   Admin API cannot be committed together. The claim is duplicate-safe,
+   Admin API cannot be committed together. The claim is fenced, duplicate-safe,
    recoverable, effect-idempotent execution with reconciliation.
-6. **No capability is claimed before its evidence exists.** The README
-   integration table is authoritative for what is and is not integrated.
+6. **The stale-worker window is narrowed, not eliminated.** Ownership is fenced
+   by a `lease_epoch`, so a worker whose lease was taken cannot advance
+   execution state, renew, or terminalize — proven live. Cloud Run v1
+   `resourceVersion` optimistic concurrency separately stops an obsolete
+   Service snapshot from overwriting a newer one, with a real HTTP 409 ABORTED
+   from Google. But a worker that lost its lease *after* its final ownership
+   check can still reach the Cloud Run API if the Service has not changed in
+   the interim. It can only ever request the exact `authorized_target_revision`
+   from the persisted decision, so the effect is identical to the one already
+   authorized, and it cannot record having acted. Two systems that cannot be
+   committed together leave this window; it is documented, not denied.
+7. **Cloud Run v2 `etag` is not a concurrency control.** Tested live against
+   the real service, a stale etag in the body, a stale `If-Match:` header and a
+   bogus etag string were all accepted with HTTP 200 on the traffic update. The
+   executor therefore mutates through v1 `replaceService`, where
+   `resourceVersion` is genuinely enforced. No claim rests on v2.
+8. **Control-plane compromise is only partly addressed.** Gate D.1 stops the
+   *executor* forging authorization. It does not protect against full
+   compromise of the authoritative policy writer. An authorization fingerprint
+   — incident, action, target, exact revision, policy version, evidence
+   snapshot — binds to exactly one execution identity, so an *equivalent*
+   re-issued decision cannot become a second infrastructure effect. A
+   compromised writer can still author a *materially different* authorization,
+   which by definition has a different fingerprint. That remains open.
+9. **Candidate freshness is point-in-time.** The rollback target is re-probed
+   through its own tag URL immediately before mutating, and a stale or
+   unhealthy candidate produces `TARGET_NO_LONGER_HEALTHY` and no mutation.
+   Nothing guarantees the target stays healthy afterwards.
+10. **No capability is claimed before its evidence exists.** The README
+    integration table is authoritative for what is and is not integrated.
 
 ## Data handling and processing location
 
