@@ -64,9 +64,20 @@ See `infra/iam-matrix.md`.
 
 Stated plainly rather than implied away.
 
-1. **Firestore IAM is project-level, not per-collection.** The read/write split
-   between `datastore.viewer` and `datastore.user` is genuinely IAM-enforced.
-   Per-collection scoping is not, and is enforced at the application layer.
+1. **Firestore isolation is database-level, not collection-level.** Google IAM
+   cannot scope below a database. Two databases are used, separated by IAM
+   conditions on `resource.name`:
+
+   | Plane | Database | Executor's access |
+   |---|---|---|
+   | Authoritative control | `(default)` | **read only** |
+   | Execution | `execution-state` | create/update, **no delete** |
+
+   The identity able to mutate Cloud Run therefore cannot modify the
+   authorization decision permitting that mutation, and cannot retract its own
+   idempotency claim to permit a replay. Within `execution-state` it can write
+   any collection; the boundary is that no authorization truth lives there.
+   Proof: `docs/evidence/gate-d1-executor-firestore-isolation.md`.
 2. **Audit truncation leaves a valid prefix.** The hash chain detects edits,
    reordering, deletion in the middle, and forged appends, but a reader must
    also check the expected record count to detect a truncated tail. Covered by

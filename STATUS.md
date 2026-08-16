@@ -1,6 +1,6 @@
 # STATUS
 
-CURRENT PHASE: Gate D complete
+CURRENT PHASE: Gate D.1 complete
 
 WED AUG 19 — FULL AUTONOMOUS SLICE: VERIFIED
 (achieved 2026-08-15, ahead of the wall-plan date)
@@ -28,10 +28,13 @@ Real execution proof exists in `docs/evidence/`.
 - **Live Firestore-atomic idempotency: 3 replays, 1 mutation**
 - **Executor refuses fabricated, denied, revoked and forged authority**
 - **Full autonomous 503 → 200 with no operator action after submission**
+- **Two-plane Firestore isolation: executor is read-only on the authoritative
+  database and append-only on the execution database, enforced by per-database
+  IAM conditions. It holds no project-level datastore role.**
 
 ## IN PROGRESS
 
-Nothing. Gate D is closed.
+Nothing. Gate D.1 is closed.
 
 ## NOT STARTED
 
@@ -48,7 +51,7 @@ Nothing. Gate D is closed.
 
 ## NEXT HARD GATE
 
-Not yet authorized. Candidates in priority order: human approval with
+Failure engineering. Not yet authorized. Candidates in priority order: human approval with
 resumable state, Model Armor inspection of untrusted content before agent use,
 and the remaining fleet investigators.
 
@@ -73,7 +76,8 @@ project        site-continuity-fleet
 core region    australia-southeast1 (Sydney)
 model          gemini-3.7-flash, Vertex AI, location=global
 model armor    australia-southeast2 (Melbourne), not integrated yet
-firestore      (default), australia-southeast1, FIRESTORE_NATIVE
+firestore      (default)        australia-southeast1  authoritative control plane
+               execution-state  australia-southeast1  idempotency + receipts
 
 services       scf-orchestrator    sa-orchestrator
                scf-agent-systems   sa-agent-systems   (read-only)
@@ -85,8 +89,10 @@ services       scf-orchestrator    sa-orchestrator
 revisions      healthy = dispatch-web-00003-x87
                broken  = dispatch-web-00004-jqm
 
-custom roles   scfRemediator     run.services.get, run.services.update
-               scfArtifactReader artifactregistry.repositories.downloadArtifacts
+custom roles   scfRemediator      run.services.get, run.services.update
+               scfArtifactReader  artifactregistry.repositories.downloadArtifacts
+               scfDecisionReader  read (default), IAM-conditioned
+               scfExecutionWriter write execution-state, IAM-conditioned
 
 repo           https://github.com/aish2897/after-hours-site-continuity-fleet
 ```

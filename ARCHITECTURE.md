@@ -111,7 +111,24 @@ sensitive or policy-restricted content must never be silently forwarded to the
 global endpoint. That boundary is what makes the split defensible; without it,
 the design would simply be leaking.
 
-## State
+## State — two planes
+
+| Plane | Database | Holds | Executor access |
+|---|---|---|---|
+| **Authoritative control** | `(default)` | incidents, evidence, decisions, audit | read only |
+| **Execution** | `execution-state` | idempotency claims, executor receipts | create/update, no delete |
+
+Both Sydney `australia-southeast1`, separated by per-database IAM conditions.
+The rule the split enforces: **the identity able to mutate Cloud Run must be
+unable to modify the authorization decision permitting that mutation.**
+
+The executor never writes the control plane. It returns a receipt, and the
+orchestrator — an authoritative writer — records the action and audit entry.
+That also keeps a single writer on the hash-chained audit log, so sequence
+numbers cannot race.
+
+This is database-level isolation. Firestore IAM cannot scope below a database;
+see `SECURITY.md`.
 
 Firestore is the authoritative incident and audit store.
 

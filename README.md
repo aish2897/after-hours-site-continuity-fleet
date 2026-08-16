@@ -47,6 +47,8 @@ capability beyond the state recorded here.
 | Live Firestore-atomic idempotency | **`VERIFIED`** | [`gate-d`](docs/evidence/gate-d-autonomous-recovery.md) |
 | Independent verification (separate identity) | **`VERIFIED`** | [`gate-d`](docs/evidence/gate-d-autonomous-recovery.md) |
 | Executor rejects forged authority | **`VERIFIED`** | [`gate-d`](docs/evidence/gate-d-autonomous-recovery.md) |
+| Executor cannot write authorization state | **`VERIFIED`** | [`gate-d1`](docs/evidence/gate-d1-executor-firestore-isolation.md) |
+| Two-plane Firestore isolation (IAM-conditioned) | **`VERIFIED`** | [`gate-d1`](docs/evidence/gate-d1-executor-firestore-isolation.md) |
 | Deterministic policy gate | `IMPLEMENTED` | `tests/policy/test_decision_matrix.py` — 26 |
 | Agent capability registry | `IMPLEMENTED` | `tests/policy/test_registry.py` — 9 |
 | Incident state machine | `IMPLEMENTED` | `tests/unit/test_state_machine.py` — 15 |
@@ -71,7 +73,7 @@ See [`STATUS.md`](STATUS.md) for the current phase and next gate.
 
 - `src/scf/domain/` — closed action enum, evidence provenance, deterministic
   idempotency derivation, 17-state incident machine, routing contract.
-- `src/scf/policy/` — the gate. Loads `policies/action_policy.json`, reads only
+- `src/scf/policy/` — the gate. Loads `src/scf/policies/action_policy.json`, reads only
   `TRUSTED_TOOL` evidence, returns a versioned decision with a reason code.
 - `src/scf/audit/` — append-only hash chain with tamper detection.
 - `src/scf/config.py` — frozen region and model decisions.
