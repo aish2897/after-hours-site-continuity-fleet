@@ -17,7 +17,12 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from scf import config
 from scf.obs import log_event, trace_id_from_header
-from scf.tools.cloud_run_evidence import describe_service, probe_health
+from scf.tools.cloud_run_evidence import (
+    describe_service,
+    probe_health,
+    serves_exclusively,
+    traffic_allocation,
+)
 
 app = FastAPI(title="SCF Verifier", version="0.4.0")
 
@@ -50,24 +55,35 @@ def health() -> dict[str, Any]:
 
 
 def _observe(service: str, expected_revision: str | None = None) -> dict[str, Any]:
+    """Three independent conditions, all required.
+
+    The authorized action is a 100% traffic flip, so the expected allocation is
+    exactly 100% to the authorized revision and nothing to anything else. A
+    healthy response is not recovery on its own — 200 from an unauthorized
+    revision is simply a different service state that happens to answer — and
+    neither is the right revision merely appearing in the traffic list. A 90/10
+    or 50/50 split, or the correct revision with unexpected secondary traffic,
+    is not the authorized outcome and must not resolve an incident.
+    """
     described = describe_service(service)
     url = described.get("uri", "")
-    active = ""
-    for entry in described.get("trafficStatuses") or []:
-        if entry.get("percent") == 100:
-            active = (entry.get("revision") or "").rsplit("/", 1)[-1]
-            break
+    allocation = traffic_allocation(described)
+    active = next((rev for rev, pct in allocation.items() if pct == 100), "")
 
     status_code, body = probe_health(url)
     responding = status_code == 200 and "healthy" in body.lower()
-    # Both conditions are required. A healthy response from an unauthorized
-    # revision is not recovery; it is a different service state that happens
-    # to return 200.
     revision_matches = expected_revision is None or active == expected_revision
+    allocation_exclusive = (
+        serves_exclusively(described, expected_revision)
+        if expected_revision
+        else allocation in ({}, {active: 100})
+    )
     return {
-        "healthy": responding and revision_matches,
+        "healthy": responding and revision_matches and allocation_exclusive,
         "http_healthy": responding,
         "revision_matches_authorized": revision_matches,
+        "traffic_allocation_exclusive": allocation_exclusive,
+        "traffic_allocation": allocation,
         "expected_revision": expected_revision,
         "http_status": status_code,
         "body": body[:120],
@@ -122,6 +138,7 @@ async def verify(
         active_revision=result["active_revision"],
         expected_revision=request.expected_revision,
         revision_matches_authorized=result["revision_matches_authorized"],
+        traffic_allocation_exclusive=result["traffic_allocation_exclusive"],
     )
     result["incident_id"] = request.incident_id
     result["verified_by_revision"] = os.environ.get("K_REVISION")

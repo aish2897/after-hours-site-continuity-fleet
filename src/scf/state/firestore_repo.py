@@ -301,6 +301,21 @@ class IncidentRepository:
             raise DecisionNotFound(f"{incident_id}/{decision_id}")
         return snapshot.to_dict()
 
+    def latest_decision(self, incident_id: str) -> dict[str, Any] | None:
+        """Most recently evaluated decision for an incident.
+
+        Used only by reconciliation, so a recovery call names an incident and
+        the orchestrator resolves the authorization itself. A caller still
+        cannot nominate which decision gets executed.
+        """
+        decisions = [
+            doc.to_dict()
+            for doc in self._doc_ref(incident_id).collection(DECISIONS).stream()
+        ]
+        if not decisions:
+            return None
+        return max(decisions, key=lambda d: str(d.get("evaluated_at") or ""))
+
     def record_action(self, incident_id: str, action: ActionRecord) -> None:
         (
             self._doc_ref(incident_id)

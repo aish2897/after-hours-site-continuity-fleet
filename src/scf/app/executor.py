@@ -4,10 +4,27 @@ Runs as sa-executor. Being able to *call* this service is not authorization to
 mutate anything: the caller supplies only identifiers, and the executor loads
 the authoritative decision from Firestore itself.
 
-Honest property: this is duplicate-safe, recoverable, effect-idempotent
-execution with reconciliation. It is NOT globally exactly-once distributed
-execution — Firestore and the Cloud Run Admin API cannot be committed
-together. A crashed execution is resolved by inspecting real infrastructure.
+## The property this defends
+
+Not globally exactly-once distributed execution — Firestore and the Cloud Run
+Admin API cannot be committed together, and no amount of code changes that.
+What is defended, in layers:
+
+1. **Firestore fencing.** Only the current lease owner, presenting the current
+   lease epoch, may advance authoritative execution state.
+2. **Cloud Run resourceVersion OCC.** An obsolete Service snapshot cannot
+   overwrite a newer Service version; Google rejects it with 409 ABORTED.
+3. **Exact target pinning.** Every duplicate request can only ever request the
+   same authorized revision, so any surviving race is effect-idempotent.
+4. **Reconciliation.** Crash boundaries are resolved by reading real
+   infrastructure, never by assuming what a dead process did.
+5. **Terminal execution state.** A verified execution can never be re-run.
+
+The honest residual: a worker that lost its lease could still reach the Cloud
+Run API after its final ownership check if the Service has not changed in the
+interim. It cannot advance execution state, and it can only request the exact
+same authorized target, so the effect is idempotent — but this window is real
+and is documented rather than denied.
 """
 
 from __future__ import annotations
@@ -22,20 +39,51 @@ from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel, ConfigDict, Field
 
 from scf.domain.enums import ActionState, ActionType, Decision, ExecutionState
-from scf.domain.ids import derive_execution_id, new_action_id, utc_now
+from scf.domain.ids import (
+    derive_authorization_fingerprint,
+    derive_execution_id,
+    new_action_id,
+    utc_now,
+)
 from scf.domain.models import ActionRecord
-from scf.executor.cloud_run import flip_traffic_to_revision
+from scf.executor.cloud_run import (
+    flip_traffic_to_revision,
+    read_service_v1,
+    resource_version_of,
+)
 from scf.obs import log_event, trace_id_from_header
 from scf.policy import default_policy, default_registry
 from scf.state import DecisionNotFound, ExecutionStore, IncidentRepository
-from scf.state.execution_store import ALREADY_FINISHED, HELD_BY_OTHER
-from scf.tools.cloud_run_evidence import describe_service, probe_health
+from scf.state.execution_store import (
+    ADVANCED,
+    ALREADY_FINISHED,
+    ALREADY_TERMINAL,
+    CONFLICT,
+    HELD_BY_OTHER,
+)
+from scf.tools.cloud_run_evidence import (
+    KNOWN_GOOD_TAG,
+    describe_service,
+    probe_health,
+    serves_exclusively,
+    traffic_allocation,
+)
 
-app = FastAPI(title="SCF Remediation Executor", version="0.5.0")
+app = FastAPI(title="SCF Remediation Executor", version="0.6.0")
 
 EXECUTOR_IDENTITY = "sa-executor"
 EXECUTABLE = {Decision.AUTO_ALLOWED.value, "APPROVED"}
 WORKER_ID = f"{os.environ.get('K_REVISION', 'local')}:{uuid.uuid4().hex[:8]}"
+
+#: States from which a fresh precondition check may proceed. MUTATED is
+#: included so a recovered execution can re-check and reconcile; terminal
+#: states are absent by construction.
+PRE_MUTATION_STATES = (
+    ExecutionState.CLAIMED,
+    ExecutionState.PRECONDITION_CHECKED,
+    ExecutionState.MUTATION_REQUESTED,
+    ExecutionState.MUTATED,
+)
 
 
 @lru_cache(maxsize=1)
@@ -52,16 +100,21 @@ def execution() -> ExecutionStore:
 class ExecuteRequest(BaseModel):
     """Identifiers only.
 
-    There is deliberately no attempt or retry field. One authoritative decision
-    has exactly one execution identity, so no caller input can mint a second
-    infrastructure execution for the same authorization. A genuine retry is
-    driven by authoritative recovery state, not by a caller-chosen value.
+    There is deliberately no attempt or retry field, no target, no revision and
+    no precondition token. One authoritative decision has exactly one execution
+    identity, so no caller input can mint a second infrastructure execution for
+    the same authorization, redirect it at another revision, or supply the
+    resourceVersion that guards the mutation.
     """
 
     model_config = ConfigDict(extra="forbid")
 
     incident_id: str = Field(min_length=3)
     decision_id: str = Field(min_length=3)
+
+
+class TerminalizeRequest(ExecuteRequest):
+    """Same surface. The verdict is re-derived, never accepted from a caller."""
 
 
 def _refuse(reason: str, **fields: Any) -> dict[str, Any]:
@@ -108,21 +161,74 @@ def _validate(decision: dict[str, Any], request: ExecuteRequest) -> str | None:
     return None
 
 
+def _identity(decision: dict[str, Any], incident_id: str, decision_id: str) -> tuple[str, str]:
+    """(execution_id, authorization_fingerprint), both derived from stored truth."""
+    params = decision.get("parameters") or {}
+    execution_id = derive_execution_id(
+        incident_id=incident_id,
+        action_type=decision["action_type"],
+        target_ref=decision["target_ref"],
+        decision_id=decision_id,
+    )
+    fingerprint = derive_authorization_fingerprint(
+        incident_id=incident_id,
+        action_type=decision["action_type"],
+        target_ref=decision["target_ref"],
+        authorized_target_revision=params["authorized_target_revision"],
+        policy_version=str(decision.get("policy_version") or ""),
+        evidence_snapshot_hash=str(decision.get("evidence_snapshot_hash") or ""),
+    )
+    return execution_id, fingerprint
+
+
 def _observe(service: str) -> dict[str, Any]:
-    """Read real infrastructure. Used for both precondition and reconciliation."""
+    """Read real infrastructure. Used for precondition and reconciliation.
+
+    Also re-probes the operator-approved candidate through its own tag URL, so
+    freshness of the rollback target is established at execution time rather
+    than inherited from an investigation that may be minutes old.
+    """
     described = describe_service(service)
-    active = ""
+    allocation = traffic_allocation(described)
+    active = next((rev for rev, pct in allocation.items() if pct == 100), "")
+
+    candidate_revision = ""
+    candidate_uri = ""
     for entry in described.get("trafficStatuses") or []:
-        if entry.get("percent") == 100:
-            active = (entry.get("revision") or "").rsplit("/", 1)[-1]
+        if entry.get("tag") == KNOWN_GOOD_TAG:
+            candidate_revision = (entry.get("revision") or "").rsplit("/", 1)[-1]
+            candidate_uri = entry.get("uri") or ""
             break
+
+    candidate_status, candidate_body = (
+        probe_health(candidate_uri) if candidate_uri else (0, "no known-good tag")
+    )
     status_code, body = probe_health(described.get("uri", ""))
     return {
         "active_revision": active,
+        "traffic_allocation": allocation,
         "etag": described.get("etag", ""),
         "http_status": status_code,
         "healthy": status_code == 200 and "healthy" in body.lower(),
+        "candidate_revision": candidate_revision,
+        "candidate_probe_http_status": candidate_status,
+        "candidate_probe_healthy": candidate_status == 200
+        and "healthy" in candidate_body.lower(),
     }
+
+
+def _candidate_is_fresh(observed: dict[str, Any], authorized_revision: str) -> str | None:
+    """Point-in-time precondition on the rollback target. Not a future guarantee.
+
+    Refuses if the operator-approved candidate is no longer the authorized
+    revision, or no longer answers healthily on its own tag URL. Nothing is
+    mutated on refusal.
+    """
+    if observed["candidate_revision"] != authorized_revision:
+        return "candidate_no_longer_approved"
+    if not observed["candidate_probe_healthy"]:
+        return "candidate_probe_unhealthy"
+    return None
 
 
 @app.post("/execute")
@@ -167,14 +273,44 @@ async def execute(
     expected_source = params.get("expected_source_revision")
     expected_etag = params.get("expected_etag")
 
-    execution_id = derive_execution_id(
-        incident_id=request.incident_id,
-        action_type=decision["action_type"],
-        target_ref=target_ref,
-        decision_id=request.decision_id,
+    execution_id, fingerprint = _identity(
+        decision, request.incident_id, request.decision_id
     )
 
-    outcome, existing = await run_in_threadpool(
+    base: dict[str, Any] = {
+        "execution_id": execution_id,
+        "authorization_fingerprint": fingerprint,
+        "authorized_target_revision": authorized_revision,
+        "execution_database": store.database,
+        "authoritative_database": repo.database,
+    }
+
+    # One authorization, one execution identity — even if the authorization is
+    # re-issued under a different decision id.
+    binding, bound = await run_in_threadpool(
+        store.bind_authorization,
+        fingerprint,
+        execution_id=execution_id,
+        incident_id=request.incident_id,
+        decision_id=request.decision_id,
+    )
+    if binding == CONFLICT:
+        log_event(
+            "execution_duplicate_authorization",
+            severity="WARNING",
+            trace_id=trace_id,
+            incident_id=request.incident_id,
+            decision_id=request.decision_id,
+            bound_execution_id=(bound or {}).get("execution_id"),
+        )
+        return _refuse(
+            "DUPLICATE_AUTHORIZATION",
+            bound_execution_id=(bound or {}).get("execution_id"),
+            bound_decision_id=(bound or {}).get("decision_id"),
+            **base,
+        )
+
+    outcome, record = await run_in_threadpool(
         store.acquire,
         execution_id,
         owner=WORKER_ID,
@@ -186,14 +322,7 @@ async def execute(
         expected_source_revision=expected_source,
         expected_etag=expected_etag,
     )
-
-    base: dict[str, Any] = {
-        "execution_id": execution_id,
-        "authorized_target_revision": authorized_revision,
-        "execution_database": store.database,
-        "authoritative_database": repo.database,
-        "outcome": outcome,
-    }
+    base["outcome"] = outcome
 
     if outcome in (ALREADY_FINISHED, HELD_BY_OTHER):
         log_event(
@@ -202,32 +331,62 @@ async def execute(
             incident_id=request.incident_id,
             decision_id=request.decision_id,
             outcome=outcome,
-            state=(existing or {}).get("state"),
+            state=(record or {}).get("state"),
         )
         return {
             "executed": False,
             "mutated": False,
             "duplicate": True,
-            "state": (existing or {}).get(
+            "terminal": outcome == ALREADY_FINISHED,
+            "state": (record or {}).get(
                 "state", ActionState.DUPLICATE_SUPPRESSED.value
             ),
             **base,
         }
 
+    owner = WORKER_ID
+    epoch = int((record or {}).get("lease_epoch") or 0)
+    base["lease_epoch"] = epoch
+
+    def _advance(state: ExecutionState, **fields: Any) -> tuple[str, dict | None]:
+        return store.advance(
+            execution_id,
+            state,
+            owner=owner,
+            lease_epoch=epoch,
+            **fields,
+        )
+
+    def _fenced(result: str, stage: str) -> dict[str, Any]:
+        log_event(
+            "execution_fenced_out",
+            severity="WARNING",
+            trace_id=trace_id,
+            incident_id=request.incident_id,
+            execution_id=execution_id,
+            lease_epoch=epoch,
+            stage=stage,
+            fence_result=result,
+        )
+        return _refuse(result, stage=stage, fenced=True, **base)
+
     # Reconcile against real infrastructure before touching anything. This is
     # what closes the crash window: we never assume what a dead process did.
     observed = await run_in_threadpool(_observe, target_ref)
     base["observed_active_revision"] = observed["active_revision"]
+    base["observed_traffic_allocation"] = observed["traffic_allocation"]
 
     if observed["active_revision"] == authorized_revision:
         # CASE B: the mutation already landed, possibly before a crash.
-        await run_in_threadpool(
-            store.advance,
-            execution_id,
+        result, _ = await run_in_threadpool(
+            _advance,
             ExecutionState.MUTATED,
+            expect_states=PRE_MUTATION_STATES,
             reconciled=True,
             observed_active_revision=observed["active_revision"],
         )
+        if result != ADVANCED:
+            return _fenced(result, "reconcile")
         log_event(
             "execution_reconciled_no_mutation",
             trace_id=trace_id,
@@ -248,9 +407,9 @@ async def execute(
         # CASE C: infrastructure is neither the authorized pre-state nor the
         # target. Something else changed it. Fail closed.
         await run_in_threadpool(
-            store.advance,
-            execution_id,
+            _advance,
             ExecutionState.STALE,
+            expect_states=PRE_MUTATION_STATES,
             observed_active_revision=observed["active_revision"],
         )
         log_event(
@@ -270,6 +429,28 @@ async def execute(
             **base,
         )
 
+    # D3.7 — the rollback target must still be healthy right now, not merely at
+    # investigation time. No mutation is issued toward a target we cannot see
+    # answering.
+    stale_candidate = _candidate_is_fresh(observed, authorized_revision)
+    if stale_candidate:
+        log_event(
+            "execution_target_no_longer_healthy",
+            severity="WARNING",
+            trace_id=trace_id,
+            incident_id=request.incident_id,
+            execution_id=execution_id,
+            detail=stale_candidate,
+            candidate_probe_http_status=observed["candidate_probe_http_status"],
+        )
+        return _refuse(
+            "TARGET_NO_LONGER_HEALTHY",
+            detail=stale_candidate,
+            candidate_probe_http_status=observed["candidate_probe_http_status"],
+            observed_candidate_revision=observed["candidate_revision"],
+            **base,
+        )
+
     if expected_etag and observed["etag"] and observed["etag"] != expected_etag:
         log_event(
             "execution_etag_drift",
@@ -279,6 +460,20 @@ async def execute(
             execution_id=execution_id,
         )
         base["etag_drift"] = True
+
+    # D3.3 — final ownership check. This write succeeds only if the lease is
+    # still ours at this instant, so a fenced-out worker never reaches the read
+    # below and never obtains a resourceVersion.
+    result, _ = await run_in_threadpool(
+        _advance,
+        ExecutionState.PRECONDITION_CHECKED,
+        expect_states=PRE_MUTATION_STATES,
+    )
+    if result != ADVANCED:
+        return _fenced(result, "precondition")
+
+    snapshot = await run_in_threadpool(read_service_v1, target_ref)
+    base["resource_version_sent"] = resource_version_of(snapshot)
 
     action_id = new_action_id()
     action = ActionRecord(
@@ -291,31 +486,79 @@ async def execute(
         executor_identity=EXECUTOR_IDENTITY,
         started_at=utc_now(),
     )
-    await run_in_threadpool(
-        store.advance,
-        execution_id,
+    result, _ = await run_in_threadpool(
+        _advance,
         ExecutionState.MUTATION_REQUESTED,
+        expect_states=(ExecutionState.PRECONDITION_CHECKED,),
         action_id=action_id,
         observed_etag=observed["etag"],
+        resource_version_sent=base["resource_version_sent"],
+    )
+    if result != ADVANCED:
+        return _fenced(result, "mutation_request")
+
+    mutation = await run_in_threadpool(
+        flip_traffic_to_revision, target_ref, authorized_revision, snapshot
     )
 
-    result = await run_in_threadpool(
-        flip_traffic_to_revision, target_ref, authorized_revision
-    )
+    accepted = bool(mutation.get("accepted"))
+    conflict = bool(mutation.get("conflict"))
 
-    accepted = bool(result.get("accepted"))
+    if conflict:
+        # Google refused the write: the Service moved on since our authorized
+        # read. Nothing was overwritten. The execution stays non-terminal so
+        # reconciliation can establish the real state.
+        await run_in_threadpool(
+            _advance,
+            ExecutionState.MUTATION_REQUESTED,
+            expect_states=(ExecutionState.MUTATION_REQUESTED,),
+            action_id=action_id,
+            last_conflict_at=utc_now(),
+        )
+        log_event(
+            "execution_resource_version_conflict",
+            severity="WARNING",
+            trace_id=trace_id,
+            incident_id=request.incident_id,
+            execution_id=execution_id,
+            resource_version_sent=base["resource_version_sent"],
+        )
+        return _refuse(
+            "CONCURRENT_MODIFICATION",
+            conflict=True,
+            http_status=mutation.get("http_status"),
+            result=mutation,
+            **base,
+        )
+
     action.state = ActionState.SUCCEEDED if accepted else ActionState.FAILED
-    action.result = result
-    action.error = None if accepted else str(result.get("error"))[:400]
+    action.result = mutation
+    action.error = None if accepted else str(mutation.get("error"))[:400]
     action.finished_at = utc_now()
 
-    await run_in_threadpool(
-        store.advance,
-        execution_id,
+    state_result, _ = await run_in_threadpool(
+        _advance,
         ExecutionState.MUTATED if accepted else ExecutionState.FAILED,
+        expect_states=(ExecutionState.MUTATION_REQUESTED,),
         action_id=action_id,
         accepted=accepted,
+        resource_version_after=mutation.get("resource_version_after"),
     )
+    if state_result != ADVANCED:
+        # The mutation was issued but we could not record it: our lease was
+        # taken while the call was in flight. Reported honestly rather than
+        # papered over; reconciliation will observe the real infrastructure.
+        log_event(
+            "execution_state_write_fenced",
+            severity="ERROR",
+            trace_id=trace_id,
+            incident_id=request.incident_id,
+            execution_id=execution_id,
+            fence_result=state_result,
+            mutation_accepted=accepted,
+        )
+        base["state_write_fenced"] = state_result
+
     await run_in_threadpool(
         store.record_receipt,
         action_id,
@@ -330,6 +573,7 @@ async def execute(
         target_ref=target_ref,
         authorized_target_revision=authorized_revision,
         accepted=accepted,
+        resource_version_sent=base["resource_version_sent"],
     )
 
     return {
@@ -339,7 +583,108 @@ async def execute(
         "reconciled": False,
         "action_id": action_id,
         "state": action.state.value,
-        "result": result,
+        "result": mutation,
         "action": action.model_dump(mode="json"),
         **base,
+    }
+
+
+@app.post("/terminalize")
+async def terminalize(
+    request: TerminalizeRequest,
+    x_cloud_trace_context: str | None = Header(default=None),
+) -> dict[str, Any]:
+    """Close a mutated execution permanently, on re-derived evidence only.
+
+    The caller cannot assert a verdict. The executor re-reads the authoritative
+    decision, re-observes the live service, and requires the exact authorized
+    revision to hold 100% of traffic with nothing else serving, plus a healthy
+    response. Only then does the execution become VERIFIED, which is terminal:
+    no later lease expiry, replay or takeover can re-run it.
+
+    The orchestrator calls this only after the independent verifier, running
+    under a different read-only identity, has returned RECOVERED. Two separate
+    identities must therefore agree before an incident may be resolved.
+    """
+    trace_id = trace_id_from_header(x_cloud_trace_context)
+    repo = authoritative()
+    store = execution()
+
+    try:
+        decision = await run_in_threadpool(
+            repo.get_decision, request.incident_id, request.decision_id
+        )
+    except DecisionNotFound:
+        return _refuse("decision_not_found", decision_id=request.decision_id)
+
+    problem = _validate(decision, request)
+    if problem:
+        return _refuse(problem, decision_id=request.decision_id)
+
+    authorized_revision = decision["parameters"]["authorized_target_revision"]
+    target_ref = decision["target_ref"]
+    execution_id, _fingerprint = _identity(
+        decision, request.incident_id, request.decision_id
+    )
+
+    current = await run_in_threadpool(store.get, execution_id)
+    base: dict[str, Any] = {
+        "execution_id": execution_id,
+        "authorized_target_revision": authorized_revision,
+        "state": (current or {}).get("state"),
+    }
+    if current is None:
+        return _refuse("execution_not_found", **base)
+    if current.get("state") == ExecutionState.VERIFIED.value:
+        return {"verified": True, "terminal": True, "outcome": ALREADY_TERMINAL, **base}
+    if current.get("state") != ExecutionState.MUTATED.value:
+        return _refuse("execution_not_mutated", **base)
+
+    described = await run_in_threadpool(describe_service, target_ref)
+    exclusive = serves_exclusively(described, authorized_revision)
+    status_code, body = await run_in_threadpool(probe_health, described.get("uri", ""))
+    healthy = status_code == 200 and "healthy" in body.lower()
+    allocation = traffic_allocation(described)
+
+    evidence = {
+        "traffic_allocation": allocation,
+        "serves_authorized_exclusively": exclusive,
+        "http_status": status_code,
+        "http_healthy": healthy,
+    }
+
+    if not (exclusive and healthy):
+        log_event(
+            "execution_terminalization_refused",
+            severity="WARNING",
+            trace_id=trace_id,
+            incident_id=request.incident_id,
+            execution_id=execution_id,
+            **evidence,
+        )
+        return _refuse("infrastructure_does_not_match_authorization", **base, **evidence)
+
+    outcome, record = await run_in_threadpool(
+        store.terminalize,
+        execution_id,
+        ExecutionState.VERIFIED,
+        verified_at=utc_now(),
+        verified_traffic_allocation=allocation,
+        verified_http_status=status_code,
+    )
+    log_event(
+        "execution_terminalized",
+        trace_id=trace_id,
+        incident_id=request.incident_id,
+        execution_id=execution_id,
+        outcome=outcome,
+        **evidence,
+    )
+    return {
+        "verified": outcome in (ADVANCED, ALREADY_TERMINAL),
+        "terminal": True,
+        "outcome": outcome,
+        **base,
+        "state": (record or {}).get("state", ExecutionState.VERIFIED.value),
+        **evidence,
     }

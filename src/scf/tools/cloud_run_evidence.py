@@ -57,6 +57,29 @@ def list_revisions(service: str) -> list[dict[str, Any]]:
     return response.json().get("revisions", [])
 
 
+def traffic_allocation(described: dict[str, Any]) -> dict[str, int]:
+    """Revision -> percent, for every revision actually receiving traffic.
+
+    Tag-only entries carry no percent and are excluded: a tag is an addressable
+    URL, not a share of live traffic. Reading the whole allocation rather than
+    hunting for a single 100% entry is what lets a caller reject a 90/10 or
+    50/50 split, or a correct revision with unexpected secondary traffic.
+    """
+    allocation: dict[str, int] = {}
+    for entry in described.get("trafficStatuses") or []:
+        percent = int(entry.get("percent") or 0)
+        if percent <= 0:
+            continue
+        revision = (entry.get("revision") or "").rsplit("/", 1)[-1]
+        allocation[revision] = allocation.get(revision, 0) + percent
+    return allocation
+
+
+def serves_exclusively(described: dict[str, Any], revision: str) -> bool:
+    """True only when the named revision takes 100% and nothing else takes any."""
+    return bool(revision) and traffic_allocation(described) == {revision: 100}
+
+
 def probe_health(url: str) -> tuple[int, str]:
     try:
         response = httpx.get(url, timeout=20.0, follow_redirects=True)

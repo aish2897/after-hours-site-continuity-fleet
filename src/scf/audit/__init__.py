@@ -4,7 +4,14 @@ Storage-agnostic: these records are built and verified here, and persisted by
 the Firestore repository. Tamper detection does not depend on the datastore.
 """
 
-from scf.audit.chain import ChainVerification, append, hashable_view, seal, verify_chain
+from scf.audit.chain import (
+    ChainVerification,
+    append,
+    hashable_view,
+    seal,
+    verify_chain,
+    verify_incident_chain,
+)
 
 __all__ = [
     "ChainVerification",
@@ -12,4 +19,5 @@ __all__ = [
     "hashable_view",
     "seal",
     "verify_chain",
+    "verify_incident_chain",
 ]

@@ -16,6 +16,7 @@ class ChainVerification(BaseModel):
     checked: int
     broken_at: int | None = None
     reason: str | None = None
+    missing_tail: int = 0
 
 
 def hashable_view(record: AuditRecord) -> dict[str, Any]:
@@ -97,4 +98,60 @@ def verify_chain(records: Iterable[AuditRecord]) -> ChainVerification:
             )
         expected_prev = record.hash
 
+    return ChainVerification(ok=True, checked=len(ordered))
+
+
+def verify_incident_chain(
+    records: Iterable[AuditRecord],
+    *,
+    audit_seq: int,
+    audit_tail_hash: str,
+) -> ChainVerification:
+    """Verify a trail against the incident document's own tail metadata.
+
+    The chain alone leaves a truncated trail internally consistent: lop off the
+    last three records and what remains still links correctly. The incident
+    document records `audit_seq` and `audit_tail_hash` in the same transaction
+    that writes each record, so comparing the trail against them detects a
+    missing tail as well as an edit.
+
+    Trust limitation, stated rather than implied: this is tamper-EVIDENT, not
+    immutable. A compromised authoritative writer holds both the records and
+    the tail metadata and could rewrite the complete chain consistently.
+    Detecting that needs an external witness this system does not have.
+    """
+    ordered = list(records)
+    structural = verify_chain(ordered)
+    if not structural.ok:
+        return structural
+
+    expected_count = int(audit_seq) + 1
+    if len(ordered) < expected_count:
+        return ChainVerification(
+            ok=False,
+            checked=len(ordered),
+            broken_at=len(ordered),
+            reason=(
+                f"truncated tail: incident records audit_seq {audit_seq}, "
+                f"trail holds {len(ordered)} record(s)"
+            ),
+            missing_tail=expected_count - len(ordered),
+        )
+    if len(ordered) > expected_count:
+        return ChainVerification(
+            ok=False,
+            checked=len(ordered),
+            broken_at=expected_count,
+            reason=(
+                f"unaccounted appends: incident records audit_seq {audit_seq}, "
+                f"trail holds {len(ordered)} record(s)"
+            ),
+        )
+    if ordered and ordered[-1].hash != audit_tail_hash:
+        return ChainVerification(
+            ok=False,
+            checked=len(ordered),
+            broken_at=ordered[-1].seq,
+            reason="trail tail hash does not match the incident's audit_tail_hash",
+        )
     return ChainVerification(ok=True, checked=len(ordered))

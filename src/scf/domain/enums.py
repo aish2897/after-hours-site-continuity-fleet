@@ -65,9 +65,15 @@ class ExecutionState(StrEnum):
     Firestore and the Cloud Run Admin API cannot be committed atomically, so
     this records where an execution reached. Recovery reconciles against real
     infrastructure rather than assuming a crashed execution did or did not act.
+
+    `PRECONDITION_CHECKED` is written immediately before the Cloud Run snapshot
+    is read. Because that write is ownership-bound, reaching it proves the
+    worker still held the lease at that instant — a worker that has been fenced
+    out cannot get past it and therefore never fetches a resourceVersion.
     """
 
     CLAIMED = "CLAIMED"
+    PRECONDITION_CHECKED = "PRECONDITION_CHECKED"
     MUTATION_REQUESTED = "MUTATION_REQUESTED"
     MUTATED = "MUTATED"
     VERIFIED = "VERIFIED"

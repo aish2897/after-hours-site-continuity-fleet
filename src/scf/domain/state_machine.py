@@ -33,7 +33,12 @@ LEGAL_TRANSITIONS: dict[IncidentStatus, frozenset[IncidentStatus]] = {
     S.APPROVAL_DENIED: frozenset({S.ESCALATED}),
     S.APPROVAL_EXPIRED: frozenset({S.ESCALATED}),
     S.EXECUTION_FAILED: frozenset({S.ESCALATED}),
-    S.REMEDIATION_FAILED: frozenset({S.ESCALATED}),
+    # REMEDIATION_FAILED is deliberately not terminal. An incident whose
+    # infrastructure mutation succeeded but whose verification could not be
+    # obtained — the verifier crashed, was unreachable, or timed out — is not
+    # closed, and must never be resolved unverified. Reconciliation re-enters
+    # VERIFYING to establish the real outcome from live infrastructure.
+    S.REMEDIATION_FAILED: frozenset({S.ESCALATED, S.VERIFYING}),
     S.RESOLVED: frozenset(),
     S.ESCALATED: frozenset(),
 }

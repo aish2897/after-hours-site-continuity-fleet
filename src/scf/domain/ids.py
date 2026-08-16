@@ -59,6 +59,41 @@ def derive_execution_id(
     return sha256(material.encode("utf-8")).hexdigest()
 
 
+def derive_authorization_fingerprint(
+    *,
+    incident_id: str,
+    action_type: str,
+    target_ref: str,
+    authorized_target_revision: str,
+    policy_version: str,
+    evidence_snapshot_hash: str,
+) -> str:
+    """Identity of an *authorization*, independent of which decision doc holds it.
+
+    Two decision documents describing the same authorized infrastructure effect
+    — same incident, same action, same target, same exact revision, same policy
+    version, same evidence snapshot — produce the same fingerprint. The
+    execution plane binds a fingerprint to exactly one execution identity, so an
+    equivalent second decision cannot become a second infrastructure effect.
+
+    Scope of the guard, stated plainly: it stops an *equivalent* re-issue. A
+    fully compromised authoritative writer can still author a materially
+    different authorization, which by definition has a different fingerprint.
+    See SECURITY.md.
+    """
+    material = "|".join(
+        [
+            incident_id,
+            action_type,
+            target_ref,
+            authorized_target_revision,
+            policy_version,
+            evidence_snapshot_hash,
+        ]
+    )
+    return sha256(material.encode("utf-8")).hexdigest()
+
+
 def chain_hash(prev_hash: str, payload: Any) -> str:
     """Hash-chain link for the append-only audit log."""
     return sha256((prev_hash + canonical_json(payload)).encode("utf-8")).hexdigest()

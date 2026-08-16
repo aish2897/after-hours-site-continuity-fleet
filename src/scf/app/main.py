@@ -442,19 +442,80 @@ async def _run_remediation(
     await run_in_threadpool(
         repo.transition, incident_id, IncidentStatus.VERIFYING, trace_id=trace_id
     )
-    verdict = await _call(
-        VERIFIER_URL,
-        "/verify",
-        {
-            "incident_id": incident_id,
-            "service": config.DISPATCH_WEB_SERVICE,
-            "expected_revision": facts.get("candidate_revision"),
-        },
-        service="verifier",
-        trace_header=trace_header,
+    return await _verify_and_close(
+        repo,
+        incident_id,
+        policy_decision.decision_id,
+        facts.get("candidate_revision"),
+        trace_id,
+        trace_header,
+        outcome,
     )
-    outcome["verification"] = verdict
 
+
+async def _verify_and_close(
+    repo: IncidentRepository,
+    incident_id: str,
+    decision_id: str,
+    expected_revision: str | None,
+    trace_id: str | None,
+    trace_header: str | None,
+    outcome: dict[str, Any],
+) -> dict[str, Any]:
+    """Verify independently, terminalize the execution, then resolve.
+
+    The order matters. An incident is never resolved while its successful
+    execution is still recoverable as MUTATED — that would leave a completed
+    incident whose execution a later lease expiry could re-enter. Verification
+    comes from a different read-only identity; terminalization requires the
+    executor to independently re-observe the same infrastructure. Both must
+    agree.
+
+    If verification cannot be obtained at all, the incident stops at
+    REMEDIATION_FAILED, which is deliberately not terminal: the mutation
+    happened, the outcome is unknown, and reconciliation — not a guess — closes
+    it. It is never resolved unverified.
+    """
+    try:
+        verdict = await _call(
+            VERIFIER_URL,
+            "/verify",
+            {
+                "incident_id": incident_id,
+                "service": config.DISPATCH_WEB_SERVICE,
+                "expected_revision": expected_revision,
+            },
+            service="verifier",
+            trace_header=trace_header,
+        )
+    except DownstreamFailure as failure:
+        await run_in_threadpool(
+            repo.append_audit,
+            incident_id,
+            actor="orchestrator",
+            event="verification_unavailable",
+            payload={"service": failure.service, "kind": failure.kind},
+            trace_id=trace_id,
+        )
+        await run_in_threadpool(
+            repo.transition,
+            incident_id,
+            IncidentStatus.REMEDIATION_FAILED,
+            trace_id=trace_id,
+        )
+        log_event(
+            "verification_unavailable",
+            severity="ERROR",
+            trace_id=trace_id,
+            incident_id=incident_id,
+            error_kind=failure.kind,
+        )
+        outcome["awaiting_reconciliation"] = True
+        outcome["failed"] = {"service": failure.service, "kind": failure.kind}
+        outcome["final_status"] = IncidentStatus.REMEDIATION_FAILED.value
+        return outcome
+
+    outcome["verification"] = verdict
     await run_in_threadpool(
         repo.append_audit,
         incident_id,
@@ -464,15 +525,12 @@ async def _run_remediation(
             "verdict": verdict.get("verdict"),
             "http_status": verdict.get("http_status"),
             "active_revision": verdict.get("active_revision"),
+            "traffic_allocation_exclusive": verdict.get("traffic_allocation_exclusive"),
         },
         trace_id=trace_id,
     )
 
-    if verdict.get("verdict") == "RECOVERED":
-        await run_in_threadpool(
-            repo.transition, incident_id, IncidentStatus.RESOLVED, trace_id=trace_id
-        )
-    else:
+    if verdict.get("verdict") != "RECOVERED":
         await run_in_threadpool(
             repo.transition,
             incident_id,
@@ -482,6 +540,137 @@ async def _run_remediation(
         await run_in_threadpool(
             repo.transition, incident_id, IncidentStatus.ESCALATED, trace_id=trace_id
         )
+        outcome["final_status"] = IncidentStatus.ESCALATED.value
+        return outcome
+
+    try:
+        terminal = await _call(
+            EXECUTOR_URL,
+            "/terminalize",
+            {"incident_id": incident_id, "decision_id": decision_id},
+            service="executor",
+            trace_header=trace_header,
+        )
+    except DownstreamFailure as failure:
+        # Same rule as an unavailable verifier: the execution is still
+        # recoverable as MUTATED, so the incident stays reconcilable rather
+        # than being closed either way.
+        await run_in_threadpool(
+            repo.transition,
+            incident_id,
+            IncidentStatus.REMEDIATION_FAILED,
+            trace_id=trace_id,
+        )
+        outcome["awaiting_reconciliation"] = True
+        outcome["failed"] = {"service": failure.service, "kind": failure.kind}
+        outcome["final_status"] = IncidentStatus.REMEDIATION_FAILED.value
+        return outcome
+    outcome["terminalization"] = terminal
+    await run_in_threadpool(
+        repo.append_audit,
+        incident_id,
+        actor="executor",
+        event="execution_terminalized",
+        payload={
+            "execution_id": terminal.get("execution_id"),
+            "outcome": terminal.get("outcome"),
+            "state": terminal.get("state"),
+            "serves_authorized_exclusively": terminal.get(
+                "serves_authorized_exclusively"
+            ),
+        },
+        actor_identity="sa-executor",
+        trace_id=trace_id,
+    )
+
+    if not terminal.get("verified"):
+        await run_in_threadpool(
+            repo.transition,
+            incident_id,
+            IncidentStatus.REMEDIATION_FAILED,
+            trace_id=trace_id,
+        )
+        await run_in_threadpool(
+            repo.transition, incident_id, IncidentStatus.ESCALATED, trace_id=trace_id
+        )
+        outcome["final_status"] = IncidentStatus.ESCALATED.value
+        return outcome
+
+    await run_in_threadpool(
+        repo.transition, incident_id, IncidentStatus.RESOLVED, trace_id=trace_id
+    )
+    outcome["final_status"] = IncidentStatus.RESOLVED.value
+    return outcome
+
+
+@app.post("/incidents/{incident_id}/reconcile")
+async def reconcile_incident(
+    incident_id: str,
+    x_cloud_trace_context: str | None = Header(default=None),
+) -> dict[str, Any]:
+    """Resume an incident whose mutation landed but whose verification did not.
+
+    Takes no authorization input whatsoever: the orchestrator resolves the
+    incident's own decision, re-delivers it to the executor — which reconciles
+    against real infrastructure rather than mutating blindly — then verifies and
+    terminalizes through the normal path.
+    """
+    trace_id = trace_id_from_header(x_cloud_trace_context)
+    repo = repository()
+    try:
+        document = await run_in_threadpool(repo.get, incident_id)
+    except IncidentNotFound as exc:
+        raise HTTPException(status_code=404, detail="incident not found") from exc
+
+    status = IncidentStatus(document["status"])
+    if status is not IncidentStatus.REMEDIATION_FAILED:
+        return {"incident_id": incident_id, "status": status.value, "reconciled": False,
+                "reason": "not_awaiting_reconciliation"}
+
+    decision = await run_in_threadpool(repo.latest_decision, incident_id)
+    if not decision:
+        raise HTTPException(status_code=409, detail="no decision to reconcile")
+
+    outcome: dict[str, Any] = {"attempted": True, "reconciliation": True}
+    try:
+        receipt = await _call(
+            EXECUTOR_URL,
+            "/execute",
+            {"incident_id": incident_id, "decision_id": decision["decision_id"]},
+            service="executor",
+            trace_header=x_cloud_trace_context,
+        )
+        outcome["execution"] = receipt
+        log_event(
+            "reconciliation_execution",
+            trace_id=trace_id,
+            incident_id=incident_id,
+            mutated=bool(receipt.get("mutated")),
+            reconciled=bool(receipt.get("reconciled")),
+            state=receipt.get("state"),
+        )
+        await run_in_threadpool(
+            repo.transition, incident_id, IncidentStatus.VERIFYING, trace_id=trace_id
+        )
+        outcome = await _verify_and_close(
+            repo,
+            incident_id,
+            decision["decision_id"],
+            (decision.get("parameters") or {}).get("authorized_target_revision"),
+            trace_id,
+            x_cloud_trace_context,
+            outcome,
+        )
+    except DownstreamFailure as failure:
+        outcome["failed"] = {"service": failure.service, "kind": failure.kind}
+        outcome["final_status"] = (await run_in_threadpool(repo.get, incident_id))[
+            "status"
+        ]
+
+    final = await run_in_threadpool(repo.get, incident_id)
+    outcome["incident_id"] = incident_id
+    outcome["status"] = final["status"]
+    outcome["reconciled"] = final["status"] == IncidentStatus.RESOLVED.value
     return outcome
 
 
