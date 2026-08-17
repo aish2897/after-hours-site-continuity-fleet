@@ -584,22 +584,28 @@ def test_only_a_recorded_mutation_is_terminalizable():
 
 
 def test_only_a_real_mismatch_closes_the_incident():
+    """Gate E moved this into the failure taxonomy; the property is unchanged."""
     from scf.app import main
+    from scf.domain.failures import FailureCategory, handling
 
     source = inspect.getsource(main._verify_and_close)
     assert 'terminal.get("reason") == "infrastructure_does_not_match_authorization"' in source
-    escalate_at = source.index("infrastructure_does_not_match_authorization")
-    assert source.index("awaiting_reconciliation", escalate_at) > escalate_at
+    # A genuine mismatch closes the incident; a bookkeeping refusal does not.
+    assert not handling(FailureCategory.VERIFICATION_FAILED).reconcilable
+    assert handling(FailureCategory.VERIFIER_UNAVAILABLE).reconcilable
 
 
 def test_an_unreachable_executor_leaves_the_incident_reconcilable():
     from scf.app import main
     from scf.domain.enums import IncidentStatus
+    from scf.domain.failures import FailureCategory, handling
     from scf.domain.state_machine import TERMINAL_STATES, can_transition
 
-    source = inspect.getsource(main._autonomous_remediation)
-    assert 'failure.service == "executor"' in source
-    assert "IncidentStatus.EXECUTION_FAILED" in source
+    failure = main.DownstreamFailure("executor", "http_503", "down")
+    assert main._categorise(failure) is FailureCategory.EXECUTOR_UNAVAILABLE
+    rule = handling(FailureCategory.EXECUTOR_UNAVAILABLE)
+    assert rule.reconcilable
+    assert rule.resting_status is IncidentStatus.EXECUTION_FAILED
     assert IncidentStatus.EXECUTION_FAILED not in TERMINAL_STATES
     # Reconciliation establishes that the mutation landed; it never re-opens
     # execution. Entry into EXECUTING stays authorization-only.
@@ -801,13 +807,20 @@ def test_a_retryable_conflict_needs_both_the_refusal_and_the_rewind():
 def test_a_conflict_that_changed_nothing_does_not_close_the_incident():
     from scf.app import main
     from scf.domain.enums import IncidentStatus
+    from scf.domain.failures import FailureCategory, handling
     from scf.domain.state_machine import TERMINAL_STATES
 
-    source = inspect.getsource(main._run_remediation)
-    guard_at = source.index("_is_retryable_conflict(receipt)")
-    escalate_at = source.index("IncidentStatus.ESCALATED", guard_at)
-    assert guard_at < escalate_at, "the conflict case must return before escalating"
+    clean = {"reason": "CONCURRENT_MODIFICATION", "retryable": True}
+    assert main._execution_failure_category(clean) is FailureCategory.EXECUTION_CONFLICT
+    rule = handling(FailureCategory.EXECUTION_CONFLICT)
+    assert rule.reconcilable and rule.retry_eligible
+    assert rule.resting_status is IncidentStatus.EXECUTION_FAILED
     assert IncidentStatus.EXECUTION_FAILED not in TERMINAL_STATES
+
+    # A conflict whose rewind was fenced is NOT a clean retry and must escalate.
+    fenced = {"reason": "CONCURRENT_MODIFICATION", "retryable": False}
+    assert main._execution_failure_category(fenced) is FailureCategory.REMEDIATION_FAILED
+    assert not handling(FailureCategory.REMEDIATION_FAILED).reconcilable
     # The recovery path applies the same rule.
     assert "_is_retryable_conflict(receipt)" in inspect.getsource(main.reconcile_incident)
 
@@ -842,11 +855,13 @@ def test_evidence_test_count_matches_the_actual_suite(request):
         pytest.skip("only meaningful for a full-suite run")
 
     root = Path(__file__).resolve().parents[2]
-    evidence = (root / "docs/evidence/gate-d3-lease-fencing-cas.md").read_text(
+    # The newest gate's artifact states the CURRENT total; older ones state the
+    # total as it stood at their own gate, which must not be rewritten.
+    evidence = (root / "docs/evidence/gate-e-failure-engineering.md").read_text(
         encoding="utf-8"
     )
     claimed = re.search(r"\*\*Offline: (\d+) passed, (\d+) skipped\*\*", evidence)
-    assert claimed, "the evidence must state a test count"
+    assert claimed, "the newest gate evidence must state a test count"
 
     collected = request.session.testscollected
     assert collected == int(claimed.group(1)) + int(claimed.group(2)), (

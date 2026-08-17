@@ -34,10 +34,11 @@ import uuid
 from functools import lru_cache
 from typing import Any
 
-from fastapi import FastAPI, Header
+from fastapi import FastAPI, Header, HTTPException
 from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel, ConfigDict, Field
 
+from scf import faults
 from scf.domain.enums import (
     ActionState,
     ActionType,
@@ -174,6 +175,7 @@ def health() -> dict[str, Any]:
         "identity": EXECUTOR_IDENTITY,
         "worker": WORKER_ID,
         "revision": os.environ.get("K_REVISION"),
+        **faults.banner(),
     }
 
 
@@ -292,6 +294,12 @@ async def execute(
     trace_id = trace_id_from_header(x_cloud_trace_context)
     repo = authoritative()
     store = execution()
+
+    if faults.is_mode(faults.EXECUTOR_5XX):
+        log_event("fault_injection", severity="WARNING", trace_id=trace_id,
+                  incident_id=request.incident_id, label=faults.LABEL,
+                  fault_mode=faults.active())
+        raise HTTPException(status_code=503, detail="FAULT INJECTION: executor down")
 
     log_event(
         "execution_requested",
@@ -622,6 +630,16 @@ async def execute(
 
     snapshot = await run_in_threadpool(read_service_v1, target_ref)
     base["resource_version_sent"] = resource_version_of(snapshot)
+
+    if faults.is_mode(faults.EXECUTOR_DELAY_BEFORE_MUTATION):
+        # Holds the request open AFTER the authorized read, so a controlled
+        # second actor can move the Service and Google's own precondition is
+        # what refuses the write. The conflict is real, not simulated.
+        log_event("fault_injection", severity="WARNING", trace_id=trace_id,
+                  incident_id=request.incident_id, label=faults.LABEL,
+                  fault_mode=faults.active(),
+                  resource_version_sent=base["resource_version_sent"])
+        await run_in_threadpool(faults.delay)
 
     action_id = new_action_id()
     action = ActionRecord(

@@ -11,11 +11,11 @@ import os
 import time
 from typing import Any
 
-from fastapi import FastAPI, Header
+from fastapi import FastAPI, Header, HTTPException
 from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel, ConfigDict, Field
 
-from scf import config
+from scf import config, faults
 from scf.obs import log_event, trace_id_from_header
 from scf.tools.cloud_run_evidence import (
     describe_service,
@@ -51,6 +51,7 @@ def health() -> dict[str, Any]:
         "role": "verifier",
         "read_only": True,
         "revision": os.environ.get("K_REVISION"),
+        **faults.banner(),
     }
 
 
@@ -126,9 +127,24 @@ async def verify(
     x_cloud_trace_context: str | None = Header(default=None),
 ) -> dict[str, Any]:
     trace_id = trace_id_from_header(x_cloud_trace_context)
+
+    if faults.is_mode(faults.VERIFIER_5XX):
+        log_event("fault_injection", severity="WARNING", trace_id=trace_id,
+                  incident_id=request.incident_id, label=faults.LABEL,
+                  fault_mode=faults.active())
+        raise HTTPException(status_code=503, detail="FAULT INJECTION: verifier down")
+
     result = await run_in_threadpool(
         _verify, request.service, request.expected_revision
     )
+
+    if faults.is_mode(faults.VERIFIER_MALFORMED):
+        # Authenticated, 200 OK, and semantically useless: the verdict is not a
+        # member of the contract. The caller must not read it as recovery.
+        log_event("fault_injection", severity="WARNING", trace_id=trace_id,
+                  incident_id=request.incident_id, label=faults.LABEL,
+                  fault_mode=faults.active())
+        result["verdict"] = "PROBABLY_FINE"
     log_event(
         "verification_completed",
         trace_id=trace_id,

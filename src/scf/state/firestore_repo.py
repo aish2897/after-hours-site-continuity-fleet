@@ -301,6 +301,36 @@ class IncidentRepository:
             raise DecisionNotFound(f"{incident_id}/{decision_id}")
         return snapshot.to_dict()
 
+    def save_escalation(
+        self,
+        incident_id: str,
+        package: dict[str, Any],
+        *,
+        trace_id: str | None = None,
+    ) -> None:
+        """Persist the human handover alongside the incident.
+
+        Written by an authoritative writer, never by the executor. It contains
+        no model text, no credentials and no API detail — see
+        `scf.domain.failures.EscalationPackage`.
+        """
+        self._doc_ref(incident_id).update(
+            {"escalation": package, "updated_at": firestore.SERVER_TIMESTAMP}
+        )
+        self.append_audit(
+            incident_id,
+            actor="orchestrator",
+            event="escalation_package",
+            payload={
+                "failure_category": package.get("failure_category"),
+                "automation_changed_anything": package.get(
+                    "automation_changed_anything"
+                ),
+                "operations_restored": package.get("operations_restored"),
+            },
+            trace_id=trace_id,
+        )
+
     def latest_decision(self, incident_id: str) -> dict[str, Any] | None:
         """Most recently evaluated decision for an incident.
 

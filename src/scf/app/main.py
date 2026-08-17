@@ -6,11 +6,22 @@ from typing import Any
 
 from fastapi import FastAPI, Header, HTTPException
 from fastapi.concurrency import run_in_threadpool
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from scf import config
 from scf.app.invoke import call_service
-from scf.domain.enums import Decision, IncidentStatus, SpecialistName, TrustLevel
+from scf.domain.enums import (
+    ActionType,
+    Decision,
+    IncidentStatus,
+    SpecialistName,
+    TrustLevel,
+)
+from scf.domain.failures import (
+    FailureCategory,
+    build_escalation_package,
+    handling,
+)
 from scf.domain.ids import new_incident_id
 from scf.domain.models import (
     ActionRecord,
@@ -22,6 +33,7 @@ from scf.domain.models import (
 from scf.obs import log_event, trace_id_from_header
 from scf.policy import evaluate, trusted_evidence_map
 from scf.state import IncidentNotFound, IncidentRepository
+from scf.tools.cloud_run_evidence import describe_service, probe_health
 
 INVESTIGATOR_URL = os.environ.get("SCF_INVESTIGATOR_URL", "")
 EXECUTOR_URL = os.environ.get("SCF_EXECUTOR_URL", "")
@@ -136,7 +148,11 @@ async def create_incident(
               model=config.VERIFIED_MODEL_ID, model_location=config.MODEL_LOCATION)
     try:
         decision = await route_incident(intake.description)
-    except Exception as exc:  # noqa: BLE001 - surfaced to caller and logged
+    except Exception as exc:  # noqa: BLE001 - categorised, never re-raised raw
+        # The incident is already persisted, so failing the HTTP call here would
+        # strand it at INTAKE with nobody told and nothing to reconcile. It is
+        # escalated instead, with a human handover, and the manager gets an
+        # answer rather than a 502.
         log_event(
             "adk_invocation_failed",
             severity="ERROR",
@@ -144,7 +160,26 @@ async def create_incident(
             incident_id=incident_id,
             error_type=type(exc).__name__,
         )
-        raise HTTPException(status_code=502, detail="routing failed") from exc
+        failed = await _fail(
+            repo,
+            incident_id,
+            WorkflowFailure(
+                FailureCategory.MODEL_OUTPUT_INVALID,
+                f"routing contract not satisfied ({type(exc).__name__})",
+            ),
+            trace_id,
+            {"attempted": True, "specialists_attempted": []},
+        )
+        final = await run_in_threadpool(repo.get, incident_id)
+        return IncidentCreated(
+            incident_id=incident_id,
+            status=final["status"],
+            summary=failed["escalation"]["impact"],
+            required_specialists=[],
+            routes=[],
+            remediation=failed,
+            trace_id=trace_id,
+        )
 
     required = [s.value for s in decision.required_specialists()]
     log_event(
@@ -184,6 +219,32 @@ async def create_incident(
         remediation=remediation,
         trace_id=trace_id,
     )
+
+
+#: Actions the closed enum deliberately keeps proposable so the deterministic
+#: gate is what refuses them, on the record. A model that hallucinates one of
+#: these produces an audited denial, never a capability.
+DANGEROUS_ACTIONS = frozenset({ActionType.EXPORT_CREDENTIALS, ActionType.DISABLE_FIREWALL})
+
+#: Executor refusal reasons, mapped onto the taxonomy. Anything unrecognised
+#: falls through to REMEDIATION_FAILED, which escalates — failing closed on an
+#: unknown refusal rather than inventing a recovery for it.
+EXECUTION_FAILURE_CATEGORIES: dict[str, FailureCategory] = {
+    "CONCURRENT_MODIFICATION": FailureCategory.EXECUTION_CONFLICT,
+    "STALE_EVIDENCE": FailureCategory.STALE_EVIDENCE,
+    "TARGET_NO_LONGER_HEALTHY": FailureCategory.TARGET_NO_LONGER_HEALTHY,
+    "MUTATION_DID_NOT_HOLD": FailureCategory.STALE_EVIDENCE,
+}
+
+
+def _execution_failure_category(receipt: dict[str, Any]) -> FailureCategory:
+    reason = str(receipt.get("reason") or "")
+    if reason == "CONCURRENT_MODIFICATION" and not _is_retryable_conflict(receipt):
+        # The conflict is real but the executor could not wind its record back,
+        # so the execution stays marked as attempted and this is not a clean
+        # retry case.
+        return FailureCategory.REMEDIATION_FAILED
+    return EXECUTION_FAILURE_CATEGORIES.get(reason, FailureCategory.REMEDIATION_FAILED)
 
 
 def _is_retryable_conflict(receipt: dict[str, Any]) -> bool:
@@ -251,6 +312,27 @@ async def _escalate(
     return IncidentStatus.ESCALATED.value
 
 
+#: Per-service call bounds. A worker that hangs must be ended by the caller's
+#: own clock, not by hope: an outage cannot be allowed to wait on a stuck
+#: investigator. Each is comfortably above the healthy path's real duration
+#: (investigator ~4 s, executor ~5 s) and well below any human's patience.
+#: The verifier's is larger because it deliberately polls a settle window.
+CALL_TIMEOUTS: dict[str, float] = {
+    "investigator": float(os.environ.get("SCF_INVESTIGATOR_TIMEOUT", "45")),
+    "executor": float(os.environ.get("SCF_EXECUTOR_TIMEOUT", "120")),
+    "verifier": float(os.environ.get("SCF_VERIFIER_TIMEOUT", "150")),
+}
+
+#: Retry budgets, stated as constants so they can be audited rather than
+#: inferred. Every one is zero: a failed downstream call is a failure to be
+#: handled deterministically, never a reason to try the same thing again in a
+#: loop. Recovery is reconciliation against real state, which is a different
+#: operation with a different guard.
+DOWNSTREAM_RETRY_BUDGET = 0
+MODEL_PARSE_RETRY_BUDGET = 0
+MUTATION_RETRY_BUDGET = 0
+
+
 async def _call(
     url: str,
     path: str,
@@ -259,12 +341,21 @@ async def _call(
     service: str,
     trace_header: str | None,
 ) -> dict[str, Any]:
-    """Bounded, explicitly-typed downstream call."""
+    """Bounded, explicitly-typed, single-attempt downstream call.
+
+    One attempt. There is no retry loop here and no back-off: see
+    DOWNSTREAM_RETRY_BUDGET.
+    """
     if not url:
         raise DownstreamFailure(service, "not_configured", "service URL is empty")
     try:
         response = await run_in_threadpool(
-            call_service, url, path, payload, trace_header=trace_header
+            call_service,
+            url,
+            path,
+            payload,
+            trace_header=trace_header,
+            timeout=CALL_TIMEOUTS.get(service, 60.0),
         )
     except Exception as exc:  # noqa: BLE001 - converted to a typed failure
         raise DownstreamFailure(service, type(exc).__name__, str(exc)) from exc
@@ -278,6 +369,125 @@ async def _call(
         raise DownstreamFailure(service, "malformed_response", str(exc)) from exc
 
 
+#: Transport-level failures that mean "the worker never answered in time".
+TIMEOUT_KINDS = frozenset(
+    {"ReadTimeout", "ConnectTimeout", "PoolTimeout", "WriteTimeout", "TimeoutException"}
+)
+
+
+def _categorise(failure: DownstreamFailure) -> FailureCategory:
+    """Map a downstream failure onto exactly one taxonomy category."""
+    if failure.kind in TIMEOUT_KINDS:
+        return FailureCategory.WORKER_TIMEOUT
+    if failure.kind == "malformed_response":
+        return FailureCategory.WORKER_CONTRACT_INVALID
+    if failure.service == "executor":
+        return FailureCategory.EXECUTOR_UNAVAILABLE
+    if failure.service == "verifier":
+        return FailureCategory.VERIFIER_UNAVAILABLE
+    if failure.kind.startswith("http_") or failure.kind == "not_configured":
+        return FailureCategory.WORKER_UNAVAILABLE
+    return FailureCategory.WORKER_UNAVAILABLE
+
+
+class WorkflowFailure(Exception):
+    """A categorised failure. Every non-happy path raises exactly one of these."""
+
+    def __init__(
+        self,
+        category: FailureCategory,
+        detail: str = "",
+        **context: Any,
+    ) -> None:
+        super().__init__(f"{category.value}: {detail}")
+        self.category = category
+        self.detail = detail[:300]
+        self.context = context
+
+
+async def _fail(
+    repo: IncidentRepository,
+    incident_id: str,
+    failure: WorkflowFailure,
+    trace_id: str | None,
+    outcome: dict[str, Any],
+) -> dict[str, Any]:
+    """The single place a failure becomes state, audit and a human handover.
+
+    Looking up the category in one table is what stops the workflow inventing
+    per-site behaviour: where the incident rests, whether it stays reconcilable,
+    what the manager is told and what is audited all come from the same row.
+    """
+    rule = handling(failure.category)
+    outcome["failure_category"] = failure.category.value
+    outcome["failure_detail"] = failure.detail
+    outcome.update(failure.context)
+
+    log_event(
+        rule.audit_event,
+        severity="ERROR",
+        trace_id=trace_id,
+        incident_id=incident_id,
+        failure_category=failure.category.value,
+        detail=failure.detail,
+        reconcilable=rule.reconcilable,
+    )
+    await run_in_threadpool(
+        repo.append_audit,
+        incident_id,
+        actor="orchestrator",
+        event=rule.audit_event,
+        payload={"failure_category": failure.category.value, "detail": failure.detail},
+        trace_id=trace_id,
+    )
+
+    # Walk to the resting state along a legal path. A reconcilable failure
+    # stops at a non-terminal state on purpose: the outcome is unknown, and an
+    # incident whose infrastructure state is unknown must never be closed.
+    if rule.reconcilable:
+        current = IncidentStatus(
+            (await run_in_threadpool(repo.get, incident_id))["status"]
+        )
+        if current is not rule.resting_status:
+            await run_in_threadpool(
+                repo.transition, incident_id, rule.resting_status, trace_id=trace_id
+            )
+        outcome["awaiting_reconciliation"] = True
+        outcome["final_status"] = rule.resting_status.value
+    else:
+        outcome["final_status"] = await _escalate(repo, incident_id, trace_id)
+
+    observed = await run_in_threadpool(_observe_service_state)
+    package = build_escalation_package(
+        incident_id=incident_id,
+        category=failure.category,
+        correlation_id=trace_id,
+        specialists_attempted=outcome.get("specialists_attempted", []),
+        evidence_keys=outcome.get("evidence_keys", []),
+        mutated=bool(outcome.get("mutated_infrastructure")),
+        current_service_state=observed["state"],
+        operations_restored=observed["restored"],
+    ).model_dump(mode="json")
+    await run_in_threadpool(repo.save_escalation, incident_id, package, trace_id=trace_id)
+    outcome["escalation"] = package
+    return outcome
+
+
+def _observe_service_state() -> dict[str, Any]:
+    """What a human would see right now. Read-only, and never fatal."""
+    try:
+        described = describe_service(config.DISPATCH_WEB_SERVICE)
+        status_code, _ = probe_health(described.get("uri", ""))
+    except Exception:  # noqa: BLE001 - a handover must not fail on a probe
+        return {"state": "could not be checked automatically", "restored": False}
+    if status_code == 200:
+        return {"state": "the dispatch service is responding normally", "restored": True}
+    return {
+        "state": "the dispatch service is still not responding normally",
+        "restored": False,
+    }
+
+
 async def _autonomous_remediation(
     repo: IncidentRepository,
     incident_id: str,
@@ -285,22 +495,12 @@ async def _autonomous_remediation(
     trace_header: str | None,
 ) -> dict[str, Any]:
     """Investigate, authorize, execute, verify. No operator step anywhere."""
-    outcome: dict[str, Any] = {"attempted": True}
+    outcome: dict[str, Any] = {"attempted": True, "specialists_attempted": ["systems"]}
     try:
         return await _run_remediation(repo, incident_id, trace_id, trace_header, outcome)
+    except WorkflowFailure as failure:
+        return await _fail(repo, incident_id, failure, trace_id, outcome)
     except DownstreamFailure as failure:
-        await run_in_threadpool(
-            repo.append_audit,
-            incident_id,
-            actor="orchestrator",
-            event="downstream_failure",
-            payload={
-                "service": failure.service,
-                "kind": failure.kind,
-                "detail": failure.detail,
-            },
-            trace_id=trace_id,
-        )
         log_event(
             "downstream_failure",
             severity="ERROR",
@@ -310,25 +510,13 @@ async def _autonomous_remediation(
             error_kind=failure.kind,
         )
         outcome["failed"] = {"service": failure.service, "kind": failure.kind}
-        current = IncidentStatus(
-            (await run_in_threadpool(repo.get, incident_id))["status"]
+        return await _fail(
+            repo,
+            incident_id,
+            WorkflowFailure(_categorise(failure), f"{failure.service}/{failure.kind}"),
+            trace_id,
+            outcome,
         )
-        if failure.service == "executor" and current is IncidentStatus.EXECUTING:
-            # We could not reach the executor, so we do not know whether it
-            # acted. Escalating to a terminal state would close an incident
-            # whose infrastructure outcome is unknown. Stop at EXECUTION_FAILED,
-            # which is reconcilable, and let recovery read reality.
-            await run_in_threadpool(
-                repo.transition,
-                incident_id,
-                IncidentStatus.EXECUTION_FAILED,
-                trace_id=trace_id,
-            )
-            outcome["awaiting_reconciliation"] = True
-            outcome["final_status"] = IncidentStatus.EXECUTION_FAILED.value
-            return outcome
-        outcome["final_status"] = await _escalate(repo, incident_id, trace_id)
-        return outcome
 
 
 async def _run_remediation(
@@ -348,18 +536,45 @@ async def _run_remediation(
         trace_header=trace_header,
     )
 
-    evidence = [Evidence.model_validate(item) for item in body["evidence"]]
+    # A 200 from an authenticated caller is not a reason to trust the payload.
+    # Authentication says who is speaking; the contract says whether what they
+    # said is usable. Both are required.
+    if body.get("budget_exceeded"):
+        raise WorkflowFailure(
+            FailureCategory.WORKER_BUDGET_EXCEEDED,
+            f"investigator exhausted {body.get('limit')}",
+            tool_calls=body.get("tool_calls"),
+        )
+    try:
+        evidence = [Evidence.model_validate(item) for item in body["evidence"]]
+    except (ValidationError, KeyError, TypeError) as exc:
+        raise WorkflowFailure(
+            FailureCategory.WORKER_CONTRACT_INVALID,
+            f"investigator evidence rejected: {type(exc).__name__}",
+        ) from exc
+
     await run_in_threadpool(repo.save_evidence, incident_id, evidence, trace_id=trace_id)
     outcome["evidence_count"] = len(evidence)
+    outcome["evidence_keys"] = [item.key for item in evidence]
 
     if not body.get("proposal"):
-        outcome["reason"] = "no_proposal"
-        await run_in_threadpool(
-            repo.transition, incident_id, IncidentStatus.ESCALATED, trace_id=trace_id
+        # Doing nothing is a legitimate outcome. The system is not obliged to
+        # change infrastructure just because it was asked to look.
+        raise WorkflowFailure(
+            FailureCategory.INSUFFICIENT_EVIDENCE,
+            "no remediation is warranted by the trusted evidence",
         )
-        return outcome
 
-    proposal = Proposal.model_validate(body["proposal"])
+    try:
+        proposal = Proposal.model_validate(body["proposal"])
+    except ValidationError as exc:
+        # An action outside the closed enum never becomes a domain object, so
+        # it cannot reach the gate, let alone the executor.
+        raise WorkflowFailure(
+            FailureCategory.WORKER_CONTRACT_INVALID,
+            "proposal is not a member of the closed action contract",
+            rejected_action=str((body.get("proposal") or {}).get("action_type"))[:64],
+        ) from exc
     outcome["proposal"] = proposal.action_type.value
     await run_in_threadpool(
         repo.transition, incident_id, IncidentStatus.PROPOSED, trace_id=trace_id
@@ -390,13 +605,29 @@ async def _run_remediation(
     outcome["reason_code"] = policy_decision.reason_code
     outcome["decision_id"] = policy_decision.decision_id
 
-    if policy_decision.decision is not Decision.AUTO_ALLOWED:
-        target = (
-            IncidentStatus.WAITING_FOR_APPROVAL
-            if policy_decision.decision is Decision.APPROVAL_REQUIRED
-            else IncidentStatus.DENIED
+    if policy_decision.decision is Decision.DENIED:
+        # The gate refused, on the record, with a reason code. A hallucinated
+        # privileged action ends here: it was proposable, it was never
+        # authorized, and nothing was touched.
+        await run_in_threadpool(
+            repo.transition, incident_id, IncidentStatus.DENIED, trace_id=trace_id
         )
-        await run_in_threadpool(repo.transition, incident_id, target, trace_id=trace_id)
+        raise WorkflowFailure(
+            FailureCategory.DANGEROUS_ACTION_REFUSED
+            if proposal.action_type in DANGEROUS_ACTIONS
+            else FailureCategory.INSUFFICIENT_EVIDENCE,
+            f"policy denied {proposal.action_type.value}: {policy_decision.reason_code}",
+            denied_action=proposal.action_type.value,
+            reason_code=policy_decision.reason_code,
+        )
+
+    if policy_decision.decision is not Decision.AUTO_ALLOWED:
+        await run_in_threadpool(
+            repo.transition,
+            incident_id,
+            IncidentStatus.WAITING_FOR_APPROVAL,
+            trace_id=trace_id,
+        )
         return outcome
 
     await run_in_threadpool(
@@ -457,24 +688,18 @@ async def _run_remediation(
             trace_id=trace_id,
         )
 
+    if receipt.get("mutated"):
+        outcome["mutated_infrastructure"] = True
+
     if not (receipt.get("mutated") or receipt.get("reconciled")):
         await run_in_threadpool(
             repo.transition, incident_id, IncidentStatus.EXECUTION_FAILED, trace_id=trace_id
         )
-        if _is_retryable_conflict(receipt):
-            # Google refused the write on the precondition and wound the record
-            # back, so nothing was applied and the execution is not marked as
-            # attempted. That is a retry case, not a failure: the incident stays
-            # at the non-terminal EXECUTION_FAILED so reconciliation can pick it
-            # up, rather than being closed on a conflict that changed nothing.
-            outcome["awaiting_reconciliation"] = True
-            outcome["final_status"] = IncidentStatus.EXECUTION_FAILED.value
-            return outcome
-        await run_in_threadpool(
-            repo.transition, incident_id, IncidentStatus.ESCALATED, trace_id=trace_id
+        raise WorkflowFailure(
+            _execution_failure_category(receipt),
+            str(receipt.get("reason") or "execution did not complete")[:200],
+            execution_reason=receipt.get("reason"),
         )
-        outcome["final_status"] = IncidentStatus.ESCALATED.value
-        return outcome
 
     await run_in_threadpool(
         repo.transition, incident_id, IncidentStatus.EXECUTED, trace_id=trace_id
@@ -531,31 +756,17 @@ async def _verify_and_close(
             trace_header=trace_header,
         )
     except DownstreamFailure as failure:
-        await run_in_threadpool(
-            repo.append_audit,
-            incident_id,
-            actor="orchestrator",
-            event="verification_unavailable",
-            payload={"service": failure.service, "kind": failure.kind},
-            trace_id=trace_id,
-        )
-        await run_in_threadpool(
-            repo.transition,
-            incident_id,
-            IncidentStatus.REMEDIATION_FAILED,
-            trace_id=trace_id,
-        )
-        log_event(
-            "verification_unavailable",
-            severity="ERROR",
-            trace_id=trace_id,
-            incident_id=incident_id,
-            error_kind=failure.kind,
-        )
-        outcome["awaiting_reconciliation"] = True
         outcome["failed"] = {"service": failure.service, "kind": failure.kind}
-        outcome["final_status"] = IncidentStatus.REMEDIATION_FAILED.value
-        return outcome
+        return await _fail(
+            repo,
+            incident_id,
+            WorkflowFailure(
+                FailureCategory.VERIFIER_UNAVAILABLE,
+                f"verifier/{failure.kind}",
+            ),
+            trace_id,
+            outcome,
+        )
 
     outcome["verification"] = verdict
     await run_in_threadpool(
@@ -579,11 +790,17 @@ async def _verify_and_close(
             IncidentStatus.REMEDIATION_FAILED,
             trace_id=trace_id,
         )
-        await run_in_threadpool(
-            repo.transition, incident_id, IncidentStatus.ESCALATED, trace_id=trace_id
+        return await _fail(
+            repo,
+            incident_id,
+            WorkflowFailure(
+                FailureCategory.VERIFICATION_FAILED,
+                "the authorized revision is not serving healthily",
+                verdict=verdict.get("verdict"),
+            ),
+            trace_id,
+            outcome,
         )
-        outcome["final_status"] = IncidentStatus.ESCALATED.value
-        return outcome
 
     try:
         terminal = await _call(
@@ -597,16 +814,17 @@ async def _verify_and_close(
         # Same rule as an unavailable verifier: the execution is still
         # recoverable as MUTATED, so the incident stays reconcilable rather
         # than being closed either way.
-        await run_in_threadpool(
-            repo.transition,
-            incident_id,
-            IncidentStatus.REMEDIATION_FAILED,
-            trace_id=trace_id,
-        )
-        outcome["awaiting_reconciliation"] = True
         outcome["failed"] = {"service": failure.service, "kind": failure.kind}
-        outcome["final_status"] = IncidentStatus.REMEDIATION_FAILED.value
-        return outcome
+        return await _fail(
+            repo,
+            incident_id,
+            WorkflowFailure(
+                FailureCategory.VERIFIER_UNAVAILABLE,
+                f"terminalization unreachable: executor/{failure.kind}",
+            ),
+            trace_id,
+            outcome,
+        )
     outcome["terminalization"] = terminal
     await run_in_threadpool(
         repo.append_audit,
@@ -637,15 +855,19 @@ async def _verify_and_close(
         # not where terminalization expected it — means the outcome is unknown,
         # not bad, so the incident stays reconcilable rather than being
         # escalated on the strength of our own record-keeping.
-        if terminal.get("reason") == "infrastructure_does_not_match_authorization":
-            await run_in_threadpool(
-                repo.transition, incident_id, IncidentStatus.ESCALATED, trace_id=trace_id
-            )
-            outcome["final_status"] = IncidentStatus.ESCALATED.value
-        else:
-            outcome["awaiting_reconciliation"] = True
-            outcome["final_status"] = IncidentStatus.REMEDIATION_FAILED.value
-        return outcome
+        mismatch = terminal.get("reason") == "infrastructure_does_not_match_authorization"
+        return await _fail(
+            repo,
+            incident_id,
+            WorkflowFailure(
+                FailureCategory.VERIFICATION_FAILED
+                if mismatch
+                else FailureCategory.VERIFIER_UNAVAILABLE,
+                str(terminal.get("reason") or "terminalization refused")[:200],
+            ),
+            trace_id,
+            outcome,
+        )
 
     await run_in_threadpool(
         repo.transition, incident_id, IncidentStatus.RESOLVED, trace_id=trace_id
