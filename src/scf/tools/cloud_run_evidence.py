@@ -8,6 +8,7 @@ what may be done about it.
 
 from __future__ import annotations
 
+import json
 import re
 import time
 from collections.abc import Callable
@@ -89,22 +90,19 @@ _HEALTHY_MARKERS = frozenset({"healthy", "ok", "ready", "serving"})
 #: substrings: `errorCount` and `no errors detected` are not failure reports,
 #: and rejecting them would make a healthy service look broken.
 _UNHEALTHY_WORDS = frozenset(
-    {"unhealthy", "unavailable", "degraded", "failing", "failed", "failure", "down"}
+    {"unhealthy", "unavailable", "degraded", "failing", "failed", "failure",
+     "down", "false"}
 )
 #: Phrases that negate a positive marker and cannot be caught word-by-word.
 _UNHEALTHY_PHRASES = ("not healthy", "not ok", "not ready", "not serving")
 
 
-def body_is_healthy(body: str) -> bool:
-    """Whether a probe body asserts health, without being fooled by negation.
+#: Keys a JSON health body might answer with. Checked in order.
+_HEALTH_KEYS = ("healthy", "ok", "ready", "serving", "status", "state")
 
-    The naive check was `"healthy" in body.lower()`, which is satisfied by the
-    word **un**healthy. A service reporting that it is unhealthy would have been
-    read as healthy — the exact inversion of the signal. Negative markers are
-    therefore rejected first, and the positive marker must appear as a whole
-    word rather than as a substring of something else.
-    """
-    text = body.strip().lower()
+
+def _text_is_healthy(text: str) -> bool:
+    """Word-level reading of a plain-text health body."""
     if not text:
         return False
     if any(phrase in text for phrase in _UNHEALTHY_PHRASES):
@@ -113,6 +111,46 @@ def body_is_healthy(body: str) -> bool:
     if words & _UNHEALTHY_WORDS:
         return False
     return bool(words & _HEALTHY_MARKERS)
+
+
+def body_is_healthy(body: str) -> bool:
+    """Whether a probe body asserts health, without being fooled by negation.
+
+    Two traps, both of which have bitten this predicate:
+
+    1. `"healthy" in body.lower()` is satisfied by the word **un**healthy, so a
+       service reporting its own failure was read as healthy — the exact
+       inversion of the signal.
+    2. Word matching alone is satisfied by `{"healthy": false}`, because the
+       word *healthy* is present. A JSON body is therefore parsed and read
+       structurally: the value of the health key decides, not its name.
+
+    Anything that does not parse as a JSON object falls back to word matching,
+    where negatives are whole words and negating phrases are matched literally.
+    """
+    text = body.strip().lower()
+    if not text:
+        return False
+
+    try:
+        payload = json.loads(text)
+    except ValueError:
+        payload = None
+
+    if isinstance(payload, dict):
+        for key in _HEALTH_KEYS:
+            if key not in payload:
+                continue
+            value = payload[key]
+            if isinstance(value, bool):
+                return value
+            if isinstance(value, str):
+                return _text_is_healthy(value.strip().lower())
+            # A non-boolean, non-string health value is not an assertion of
+            # health, and guessing at it would be exactly the wrong instinct.
+            return False
+
+    return _text_is_healthy(text)
 
 
 def probe(url: str) -> tuple[int, bool, str]:

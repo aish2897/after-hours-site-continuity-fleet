@@ -1119,24 +1119,35 @@ async def reconcile_incident(
             trace_header=x_cloud_trace_context,
         )
         outcome["execution"] = receipt
+        try:
+            reported = ExecutionReceipt.model_validate(receipt)
+        except ValidationError as exc:
+            # Same rule as the primary path: an unreadable receipt from an
+            # authenticated worker decides nothing.
+            outcome["failure_category"] = FailureCategory.WORKER_CONTRACT_INVALID.value
+            outcome["failure_detail"] = (
+                f"executor receipt is not a valid contract ({exc.error_count()})"
+            )
+            final = await run_in_threadpool(repo.get, incident_id)
+            outcome.update(
+                {"incident_id": incident_id, "status": final["status"],
+                 "reconciled": False}
+            )
+            return outcome
         log_event(
             "reconciliation_execution",
             trace_id=trace_id,
             incident_id=incident_id,
-            mutated=bool(receipt.get("mutated")),
-            reconciled=bool(receipt.get("reconciled")),
-            state=receipt.get("state"),
+            mutated=reported.mutated,
+            reconciled=reported.reconciled,
+            state=reported.state,
         )
 
         if status is IncidentStatus.EXECUTION_FAILED:
             # The incident never left the execution phase, because we could not
             # reach the executor to learn the outcome. Reconciliation does not
             # re-open execution — it establishes what actually happened.
-            if not (
-                receipt.get("mutated")
-                or receipt.get("reconciled")
-                or _execution_already_landed(receipt)
-            ):
+            if not (reported.progressed() or _execution_already_landed(receipt)):
                 if _is_retryable_conflict(receipt):
                     # Same rule on the recovery path: a conflict that applied
                     # nothing leaves the incident reconcilable rather than

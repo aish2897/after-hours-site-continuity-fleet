@@ -82,7 +82,7 @@ Real execution proof exists in `docs/evidence/`.
   action, action outside the closed enum, runaway worker loop, insufficient
   evidence, and a malformed authenticated worker payload. No scenario produced
   more than one infrastructure change.**
-- **Closed failure taxonomy: 13 categories, one table fixing resting state,
+- **Closed failure taxonomy: 14 categories, one table fixing resting state,
   reconcilability, retry eligibility, audit event and manager summary**
 - **Deterministic escalation package: plain-language impact, what automation
   did and did not change, current service state, recommended action — no model
