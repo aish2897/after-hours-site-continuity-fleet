@@ -138,9 +138,14 @@ Stated plainly rather than implied away.
    second check narrows the window rather than eliminating it — the same
    limitation as the ownership fence, stated the same way.
 10. **One authorization is not an open-ended licence.** An execution that has
-    already performed its mutation refuses to perform it again if the target is
-    no longer live: a fresh failure requires a fresh incident and a fresh
+    already *issued* its mutation refuses to issue another if the target is no
+    longer live: a fresh failure requires a fresh incident and a fresh
     authorization, so an operator's deliberate rollback is never overwritten.
+    "Issued" deliberately includes a mutation Google accepted whose success
+    write was fenced — that record never advances past `MUTATION_REQUESTED`, so
+    that state must count as attempted. The one case treated as definitely not
+    applied is a 409 ABORTED, which is proof the write was refused, and which
+    therefore still permits a legitimate retry.
 11. **Candidate freshness is point-in-time.** The rollback target is re-probed
    through its own tag URL immediately before mutating, and a stale or
    unhealthy candidate produces `TARGET_NO_LONGER_HEALTHY` and no mutation.

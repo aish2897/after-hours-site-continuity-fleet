@@ -696,10 +696,10 @@ def test_an_already_mutated_execution_never_mutates_again():
     guard_at = source.index("MUTATION_DID_NOT_HOLD")
     mutate_at = source.index("flip_traffic_to_revision")
     assert guard_at < mutate_at
-    assert 'current_state == ExecutionState.MUTATED.value' in source
+    assert "current_state in ATTEMPTED_STATES" in source
     # It must not write a terminal state: the traffic migration is async and a
     # fresh observation can legitimately still show the old revision.
-    guard = source[source.index("if current_state == ExecutionState.MUTATED.value"):guard_at]
+    guard = source[source.index("if current_state in ATTEMPTED_STATES"):guard_at]
     assert "ExecutionState.FAILED" not in guard
     assert "store.release" in guard
 
@@ -730,3 +730,44 @@ def test_a_closed_incident_mid_flight_gives_the_lease_back():
     recheck_at = source.index("incident_closed_during_execution")
     window = source[source.index("latest = await run_in_threadpool"):recheck_at]
     assert "store.release" in window
+
+
+# --- Codex review round 3 -----------------------------------------------------
+
+
+def test_an_issued_but_unrecorded_mutation_also_blocks_a_second_one():
+    """A mutation Google accepted whose success write was fenced still counts."""
+    from scf.app.executor import ATTEMPTED_STATES
+
+    assert ATTEMPTED_STATES == {
+        ExecutionState.MUTATION_REQUESTED.value,
+        ExecutionState.MUTATED.value,
+    }
+    # States before the mutation was issued must NOT block a legitimate attempt.
+    for state in (ExecutionState.CLAIMED, ExecutionState.PRECONDITION_CHECKED):
+        assert state.value not in ATTEMPTED_STATES
+
+
+def test_attempted_is_wider_than_terminalizable():
+    """Issuing a mutation bars a retry; only a recorded one may be closed."""
+    from scf.app.executor import ATTEMPTED_STATES, TERMINALIZABLE_STATES
+
+    assert TERMINALIZABLE_STATES < ATTEMPTED_STATES
+
+
+def test_a_real_conflict_rewinds_so_a_retry_stays_possible():
+    """409 is proof nothing was applied, so it must not bar a legitimate retry."""
+    source = inspect.getsource(__import__("scf.app.executor", fromlist=["execute"]).execute)
+    conflict = source[source.index("if conflict:"):source.index("action.state =")]
+    assert "ExecutionState.PRECONDITION_CHECKED" in conflict
+    assert "expect_states=(ExecutionState.MUTATION_REQUESTED,)" in conflict
+    # And PRECONDITION_CHECKED is not an attempted state, so the retry proceeds.
+    from scf.app.executor import ATTEMPTED_STATES
+
+    assert ExecutionState.PRECONDITION_CHECKED.value not in ATTEMPTED_STATES
+
+
+def test_a_non_conflict_failure_stays_conservative():
+    """A 500 might have applied something; only 409 proves it did not."""
+    source = inspect.getsource(__import__("scf.app.executor", fromlist=["execute"]).execute)
+    assert "ExecutionState.MUTATED if accepted else ExecutionState.FAILED" in source

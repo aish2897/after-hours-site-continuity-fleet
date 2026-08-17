@@ -63,8 +63,9 @@ Real execution proof exists in `docs/evidence/`.
   RESOLVED or ESCALATED incident is refused with no infrastructure effect**
 - **An unreachable executor or verifier leaves the incident reconcilable rather
   than falsely closed; reconciliation completes it with exactly one effect**
-- **Reconciliation is observe-only: an execution that already mutated refuses to
-  mutate again, so an operator's deliberate rollback is never overwritten**
+- **An execution that has issued its mutation — recorded or not — refuses to
+  issue another, so an operator's deliberate rollback is never overwritten. A
+  409 ABORTED is proof nothing was applied and preserves a legitimate retry.**
 
 ## IN PROGRESS
 

@@ -101,6 +101,18 @@ PRE_MUTATION_STATES = (
     ExecutionState.MUTATED,
 )
 
+#: States meaning "this execution has already got as far as issuing its
+#: mutation". `MUTATION_REQUESTED` is written immediately *before* the Cloud
+#: Run call, so it does not prove the call was made — which is exactly why it
+#: belongs here. If the call was accepted but the success write was fenced, the
+#: record never advances past this state, and treating it as "not yet
+#: attempted" would let the same authorization fire a second time. Failing
+#: closed costs a rare escalation; failing open costs a duplicate
+#: infrastructure change.
+ATTEMPTED_STATES = frozenset(
+    {ExecutionState.MUTATION_REQUESTED.value, ExecutionState.MUTATED.value}
+)
+
 #: The only state a successful verification may close.
 #:
 #: `MUTATION_REQUESTED` is deliberately NOT here. It is written *before* the
@@ -470,13 +482,17 @@ async def execute(
             **base,
         }
 
-    if current_state == ExecutionState.MUTATED.value:
-        # This execution already performed its one authorized mutation, and the
-        # authorized target is no longer live. Something undid it — an operator
-        # rollback, a competing deploy, a fresh failure. Re-applying would make
-        # one authorization an open-ended licence to keep changing
-        # infrastructure, so it is refused: a new failure needs a new incident
-        # and a new authorization.
+    if current_state in ATTEMPTED_STATES:
+        # This execution already issued — or may already have issued — its one
+        # authorized mutation, and the authorized target is not live now.
+        # Something undid it: an operator rollback, a competing deploy, a fresh
+        # failure. Re-applying would make one authorization an open-ended
+        # licence to keep changing infrastructure, so it is refused. A new
+        # failure needs a new incident and a new authorization.
+        #
+        # `MUTATION_REQUESTED` counts, deliberately. A mutation Google accepted
+        # whose success write was fenced never advances past it, so treating
+        # that as "not yet attempted" would let one authorization fire twice.
         #
         # Nothing is terminalized here. A Cloud Run traffic migration is
         # asynchronous, so an observation taken moments after our own mutation
@@ -497,7 +513,11 @@ async def execute(
         )
         return _refuse(
             "MUTATION_DID_NOT_HOLD",
-            detail="this execution already mutated; the target is no longer live",
+            detail=(
+                "this execution already mutated"
+                if current_state == ExecutionState.MUTATED.value
+                else "this execution may already have issued its mutation"
+            ),
             observed=observed["active_revision"],
             **base,
         )
@@ -634,11 +654,14 @@ async def execute(
 
     if conflict:
         # Google refused the write: the Service moved on since our authorized
-        # read. Nothing was overwritten. The execution stays non-terminal so
-        # reconciliation can establish the real state.
+        # read. A 409 is proof that nothing was applied, so the record is wound
+        # back to PRECONDITION_CHECKED. That distinction is load-bearing —
+        # leaving it at MUTATION_REQUESTED would mark this execution as having
+        # possibly acted and permanently bar a legitimate retry, for a call we
+        # know had no effect.
         await run_in_threadpool(
             _advance,
-            ExecutionState.MUTATION_REQUESTED,
+            ExecutionState.PRECONDITION_CHECKED,
             expect_states=(ExecutionState.MUTATION_REQUESTED,),
             action_id=action_id,
             last_conflict_at=utc_now(),

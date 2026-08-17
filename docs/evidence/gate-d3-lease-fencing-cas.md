@@ -509,7 +509,7 @@ two of them introduced by the round-1 fixes. All three were real and are fixed.
 
 | # | Finding | Fix |
 |---|---|---|
-| High 1 | Reconciliation was not observe-only. An execution already at `MUTATED` could mutate *again* if the service had drifted back to the authorized pre-state — overwriting an operator's deliberate rollback and making one authorization an open-ended licence. | An execution recovered in `MUTATED` whose target is no longer live now refuses with `MUTATION_DID_NOT_HOLD` and mutates nothing. A fresh failure needs a fresh incident and a fresh authorization. It deliberately writes no terminal state: a traffic migration is asynchronous, so an observation taken moments after our own mutation can legitimately still show the old revision, and writing `FAILED` on that basis would be a race rather than a finding. |
+| High 1 | Reconciliation was not observe-only. An execution already at `MUTATED` could mutate *again* if the service had drifted back to the authorized pre-state — overwriting an operator's deliberate rollback and making one authorization an open-ended licence. | An execution recovered in an already-attempted state whose target is no longer live now refuses with `MUTATION_DID_NOT_HOLD` and mutates nothing. A fresh failure needs a fresh incident and a fresh authorization. It deliberately writes no terminal state: a traffic migration is asynchronous, so an observation taken moments after our own mutation can legitimately still show the old revision, and writing `FAILED` on that basis would be a race rather than a finding. Round 3 widened which states count — see below. |
 | High 2 | The incident-closure guard was a single read taken before binding, ownership, probing and the Cloud Run read. An incident could close during that window and the in-flight request would still mutate. | The status is re-read immediately before the Cloud Run snapshot, after the ownership fence. A closed incident releases the lease and refuses with `incident_closed_during_execution:<status>`. |
 | Medium 1 | Terminalization accepted `MUTATION_REQUESTED`, which is written *before* the API call, so an execution could be closed as `VERIFIED` on the strength of a healthy service some other actor produced — false attribution. | Reverted to `MUTATED` only. Round 1's symptom is already fixed at its source by the lapsed-lease re-acquisition, and reconciliation converts a half-recorded execution to `MUTATED` by observing the authorized target really is live. |
 
@@ -533,8 +533,7 @@ operator undoes it            live HTTP 503 on dispatch-web-00004-jqm
 re-delivery of the same decision:
   recovered_state             MUTATED
   reason                      MUTATION_DID_NOT_HOLD
-  detail                      this execution already mutated; the target is
-                              no longer live
+  detail                      this execution already mutated
   observed                    dispatch-web-00004-jqm
   authorized_target_revision  dispatch-web-00003-x87
   mutated                     False
@@ -543,6 +542,50 @@ re-delivery of the same decision:
 ```
 
 The operator's deliberate rollback was **not** overwritten.
+
+## Codex hostile review — round 3
+
+The round-2 fixes were reviewed again. Round 3 confirmed High 2 and Medium 1
+closed, and returned **FIX FIRST** on one High and one Medium, both concerning
+the same gap: the round-2 guard protected executions *recorded* as `MUTATED`,
+not mutations that Google had *accepted* but whose success write was fenced.
+
+**The hole, exactly as found:**
+
+1. Worker A writes `MUTATION_REQUESTED` and calls Cloud Run.
+2. Google accepts the traffic change, but A's lease lapses and B takes over
+   before A can write `MUTATED`. A's success write is fenced, so the record
+   never advances past `MUTATION_REQUESTED`.
+3. An operator rolls traffic back to the pre-state.
+4. Re-delivery of the same decision sees a state that is not `MUTATED`, so the
+   round-2 guard does not fire, the expected-source precondition passes, and
+   the same authorization issues a **second** Cloud Run mutation.
+
+**Fix.** `MUTATION_REQUESTED` now counts as attempted, alongside `MUTATED`. It
+is written immediately *before* the API call, which is precisely why it belongs
+there: it cannot prove a call was made, so it must be treated as though one
+was. Failing closed costs a rare escalation; failing open costs a duplicate
+infrastructure change.
+
+One distinction is preserved deliberately. A **409 ABORTED is proof that
+nothing was applied**, so a conflict winds the record back to
+`PRECONDITION_CHECKED` — which is not an attempted state — and a legitimate
+retry can still proceed. Any other non-2xx might have applied something, so it
+stays conservative and fails the execution.
+
+The resulting rule, stated exactly:
+
+| Recovered state | Target live? | Behaviour |
+|---|---|---|
+| `CLAIMED`, `PRECONDITION_CHECKED` | no | mutate (nothing was ever issued) |
+| `MUTATION_REQUESTED`, `MUTATED` | yes | reconcile, no mutation |
+| `MUTATION_REQUESTED`, `MUTATED` | no | **refuse** `MUTATION_DID_NOT_HOLD`, no mutation |
+| any | — | never a second Cloud Run call for one authorization |
+
+**Scope of the claim, corrected.** "Reconciliation is observe-only" is true for
+every execution that has reached the point of issuing its mutation. It is not a
+claim that a duplicate Cloud Run *call* is impossible in every ordering — the
+D3.5 stale-worker window remains, and remains documented.
 
 ## IAM and Gate D.1 regression (Tests N, O)
 
@@ -570,7 +613,7 @@ its own claim.
 
 ## Tests
 
-**Offline: 268 passed, 11 skipped** — including 71 new Gate D.3 contract tests
+**Offline: 272 passed, 11 skipped** — including 75 new Gate D.3 contract tests
 covering epoch issuance, the five-condition compare-and-set, fence ordering
 around the Cloud Run read, the whole replacement-body builder (image, runtime
 identity, environment, ingress, scaling, labels, tag preservation, revision
