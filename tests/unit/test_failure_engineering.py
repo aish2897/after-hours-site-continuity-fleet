@@ -558,9 +558,102 @@ def test_failures_flow_through_one_place():
     assert "def _fail(" in source
 
 
-def test_the_handover_survives_a_failing_probe():
+def test_the_handover_reports_only_what_an_authorized_identity_observed():
+    """The orchestrator holds no read on the target and must not acquire one."""
     from scf.app import main
 
     source = inspect.getsource(main._observe_service_state)
-    assert "except Exception" in source
+    assert "describe_service" not in source, "the orchestrator must not probe directly"
     assert "could not be checked automatically" in source
+
+    # Nothing observed -> say so, rather than guess.
+    assert main._observe_service_state({}) == {
+        "state": "could not be checked automatically",
+        "restored": False,
+    }
+    # The verifier's verdict is authoritative when there is one.
+    assert main._observe_service_state(
+        {"verification": {"verdict": "RECOVERED"}}
+    )["restored"] is True
+    assert main._observe_service_state(
+        {"verification": {"verdict": "STILL_FAILING"}}
+    )["restored"] is False
+    # Otherwise the investigator's trusted observation.
+    assert main._observe_service_state({"service_http_status": 200})["restored"] is True
+    assert main._observe_service_state({"service_http_status": 503})["restored"] is False
+
+
+def test_the_orchestrator_never_reads_the_target_service():
+    """Widening its IAM to populate a status line would be a bad trade."""
+    from scf.app import main
+
+    source = inspect.getsource(main)
+    assert "describe_service" not in source
+    assert "probe_health" not in source
+
+
+# --- E10: an unknown outcome must never be closed ----------------------------
+
+
+def test_reaching_the_executor_or_verifier_is_never_a_terminal_timeout():
+    """The sharpest false negative: fix the outage, then report failure.
+
+    An executor timeout may mean the mutation completed and simply outlived our
+    patience. Categorising that as a terminal WORKER_TIMEOUT escalated the
+    incident while the fix was landing, and left no way back — found live.
+    """
+    from scf.app import main
+
+    for kind in list(main.TIMEOUT_KINDS) + ["http_503", "ConnectError", "not_configured"]:
+        assert main._categorise(
+            main.DownstreamFailure("executor", kind, "x")
+        ) is FailureCategory.EXECUTOR_UNAVAILABLE, kind
+        assert main._categorise(
+            main.DownstreamFailure("verifier", kind, "x")
+        ) is FailureCategory.VERIFIER_UNAVAILABLE, kind
+
+    for category in (FailureCategory.EXECUTOR_UNAVAILABLE,
+                     FailureCategory.VERIFIER_UNAVAILABLE):
+        assert handling(category).reconcilable, category
+
+
+def test_a_read_only_worker_may_still_be_escalated_on_timeout():
+    """The investigator changes nothing, so an unknown outcome is not possible."""
+    from scf.app import main
+
+    assert main._categorise(
+        main.DownstreamFailure("investigator", "ReadTimeout", "x")
+    ) is FailureCategory.WORKER_TIMEOUT
+    assert not handling(FailureCategory.WORKER_TIMEOUT).reconcilable
+
+
+def test_service_identity_dominates_failure_kind():
+    from scf.app import main
+
+    source = inspect.getsource(main._categorise)
+    assert source.index('failure.service == "executor"') < source.index("TIMEOUT_KINDS")
+
+
+def test_a_duplicate_outcome_is_not_a_failed_remediation():
+    """A worker that outlived its caller still did the work."""
+    from scf.app import main
+
+    for state in ("MUTATED", "VERIFIED", "MUTATION_REQUESTED"):
+        assert main._execution_already_landed(
+            {"duplicate": True, "state": state}
+        ), state
+    # Nothing has landed in these.
+    for state in ("CLAIMED", "PRECONDITION_CHECKED", "FAILED", "STALE", None):
+        assert not main._execution_already_landed({"duplicate": True, "state": state})
+    # And a non-duplicate receipt says nothing about another worker.
+    assert not main._execution_already_landed({"state": "MUTATED"})
+
+
+def test_reconciliation_does_not_escalate_work_another_worker_completed():
+    from scf.app import main
+
+    source = inspect.getsource(main.reconcile_incident)
+    assert "_execution_already_landed(receipt)" in source
+    landed_at = source.index("_execution_already_landed(receipt)")
+    escalate_at = source.index("IncidentStatus.ESCALATED", landed_at)
+    assert landed_at < escalate_at

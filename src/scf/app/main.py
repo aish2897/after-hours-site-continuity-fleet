@@ -33,7 +33,6 @@ from scf.domain.models import (
 from scf.obs import log_event, trace_id_from_header
 from scf.policy import evaluate, trusted_evidence_map
 from scf.state import IncidentNotFound, IncidentRepository
-from scf.tools.cloud_run_evidence import describe_service, probe_health
 
 INVESTIGATOR_URL = os.environ.get("SCF_INVESTIGATOR_URL", "")
 EXECUTOR_URL = os.environ.get("SCF_EXECUTOR_URL", "")
@@ -376,17 +375,28 @@ TIMEOUT_KINDS = frozenset(
 
 
 def _categorise(failure: DownstreamFailure) -> FailureCategory:
-    """Map a downstream failure onto exactly one taxonomy category."""
-    if failure.kind in TIMEOUT_KINDS:
-        return FailureCategory.WORKER_TIMEOUT
-    if failure.kind == "malformed_response":
-        return FailureCategory.WORKER_CONTRACT_INVALID
+    """Map a downstream failure onto exactly one taxonomy category.
+
+    Which service failed matters more than how. For the executor and the
+    verifier — the two components that touch or grade infrastructure — *any*
+    failure to reach them means the outcome is unknown, and an unknown outcome
+    must stay reconcilable. A timeout is the sharpest case: the executor may
+    well have completed the mutation and simply outlived our patience, so
+    treating it as a terminal failure would let the fleet fix an outage and
+    then report that it had not. That is a false negative, and it is worse than
+    a slow answer.
+
+    The investigator is different: it is read-only and changes nothing, so
+    failing to reach it can be escalated safely.
+    """
     if failure.service == "executor":
         return FailureCategory.EXECUTOR_UNAVAILABLE
     if failure.service == "verifier":
         return FailureCategory.VERIFIER_UNAVAILABLE
-    if failure.kind.startswith("http_") or failure.kind == "not_configured":
-        return FailureCategory.WORKER_UNAVAILABLE
+    if failure.kind in TIMEOUT_KINDS:
+        return FailureCategory.WORKER_TIMEOUT
+    if failure.kind == "malformed_response":
+        return FailureCategory.WORKER_CONTRACT_INVALID
     return FailureCategory.WORKER_UNAVAILABLE
 
 
@@ -457,7 +467,7 @@ async def _fail(
     else:
         outcome["final_status"] = await _escalate(repo, incident_id, trace_id)
 
-    observed = await run_in_threadpool(_observe_service_state)
+    observed = _observe_service_state(outcome)
     package = build_escalation_package(
         incident_id=incident_id,
         category=failure.category,
@@ -473,19 +483,37 @@ async def _fail(
     return outcome
 
 
-def _observe_service_state() -> dict[str, Any]:
-    """What a human would see right now. Read-only, and never fatal."""
-    try:
-        described = describe_service(config.DISPATCH_WEB_SERVICE)
-        status_code, _ = probe_health(described.get("uri", ""))
-    except Exception:  # noqa: BLE001 - a handover must not fail on a probe
-        return {"state": "could not be checked automatically", "restored": False}
-    if status_code == 200:
+def _observe_service_state(outcome: dict[str, Any]) -> dict[str, Any]:
+    """What a human would see, from evidence the fleet actually gathered.
+
+    Deliberately NOT a fresh probe by the orchestrator. The orchestrator holds
+    no read permission on the target service — that permission belongs to the
+    investigator and the verifier, under their own identities — and widening it
+    to populate a status line would trade a real security boundary for a
+    cosmetic one. So this reports what was genuinely observed by an identity
+    authorized to look, and says plainly when nothing was.
+    """
+    verdict = (outcome.get("verification") or {}).get("verdict")
+    if verdict == "RECOVERED":
         return {"state": "the dispatch service is responding normally", "restored": True}
-    return {
-        "state": "the dispatch service is still not responding normally",
-        "restored": False,
-    }
+    if verdict:
+        return {
+            "state": "the dispatch service is still not responding normally",
+            "restored": False,
+        }
+
+    status = outcome.get("service_http_status")
+    if status == 200:
+        return {"state": "the dispatch service is responding normally", "restored": True}
+    if isinstance(status, int) and status:
+        return {
+            "state": "the dispatch service is still not responding normally",
+            "restored": False,
+        }
+    # A failure early enough that nobody got to look — a timeout, an
+    # unavailable investigator, unusable model output. Saying so is more useful
+    # to a duty manager than a confident guess.
+    return {"state": "could not be checked automatically", "restored": False}
 
 
 async def _autonomous_remediation(
@@ -556,6 +584,11 @@ async def _run_remediation(
     await run_in_threadpool(repo.save_evidence, incident_id, evidence, trace_id=trace_id)
     outcome["evidence_count"] = len(evidence)
     outcome["evidence_keys"] = [item.key for item in evidence]
+    # Recorded here so a later failure can tell the manager what the service
+    # was actually doing, using evidence gathered by an authorized identity.
+    observed_status = trusted_evidence_map(evidence).get("http_status")
+    if isinstance(observed_status, int):
+        outcome["service_http_status"] = observed_status
 
     if not body.get("proposal"):
         # Doing nothing is a legitimate outcome. The system is not obliged to
@@ -876,6 +909,26 @@ async def _verify_and_close(
     return outcome
 
 
+#: Execution states meaning the authorized effect has been issued or completed
+#: by somebody. Reconciliation must not read these as failure.
+LANDED_EXECUTION_STATES = frozenset({"MUTATED", "VERIFIED", "MUTATION_REQUESTED"})
+
+
+def _execution_already_landed(receipt: dict[str, Any]) -> bool:
+    """Did a worker other than this call already carry the execution forward?
+
+    A duplicate outcome — the execution is held by a live owner, or already
+    finished — is not a failed remediation. A worker that outlived the caller
+    who was waiting on it still did the work. Escalating on that would close an
+    incident whose fix had in fact landed, which is the worst error this system
+    can make: it tells a duty manager nothing was done while the shop is back
+    up, and leaves no route to correct it.
+    """
+    if not receipt.get("duplicate"):
+        return False
+    return str(receipt.get("state") or "") in LANDED_EXECUTION_STATES
+
+
 #: Non-terminal states meaning "a mutation may have happened and we could not
 #: establish the outcome". Neither may be resolved without reading reality.
 RECONCILABLE_STATES = frozenset(
@@ -934,7 +987,11 @@ async def reconcile_incident(
             # The incident never left the execution phase, because we could not
             # reach the executor to learn the outcome. Reconciliation does not
             # re-open execution — it establishes what actually happened.
-            if not (receipt.get("mutated") or receipt.get("reconciled")):
+            if not (
+                receipt.get("mutated")
+                or receipt.get("reconciled")
+                or _execution_already_landed(receipt)
+            ):
                 if _is_retryable_conflict(receipt):
                     # Same rule on the recovery path: a conflict that applied
                     # nothing leaves the incident reconcilable rather than
