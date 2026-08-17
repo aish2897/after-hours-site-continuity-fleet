@@ -59,6 +59,10 @@ Real execution proof exists in `docs/evidence/`.
 - **Audit truncation detected against the incident's own `audit_seq` and
   `audit_tail_hash`**
 - **One authorization fingerprint binds to exactly one execution identity**
+- **Control-plane closure at the mutating boundary: a decision belonging to a
+  RESOLVED or ESCALATED incident is refused with no infrastructure effect**
+- **An unreachable executor or verifier leaves the incident reconcilable rather
+  than falsely closed; reconciliation completes it with exactly one effect**
 
 ## IN PROGRESS
 
@@ -84,7 +88,7 @@ Nothing. Gate D.3 is closed.
 - The stale-worker window is narrowed, not eliminated. A worker that lost its
   lease after its final ownership check can still reach the Cloud Run API if
   the service has not changed. It can only apply the same authorized effect and
-  cannot record having done so.
+  cannot advance the execution lifecycle state or write a receipt.
 - Audit is tamper-evident, NOT immutable.
 - Firestore isolation is database-level, NOT collection-level.
 - Cloud Run v2 does NOT enforce the service etag on the traffic update — proven

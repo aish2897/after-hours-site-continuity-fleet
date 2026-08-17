@@ -508,3 +508,172 @@ def test_executor_refuses_a_second_execution_for_the_same_authorization():
     acquire_at = source.index("store.acquire")
     assert bind_at < acquire_at, "bind before any ownership or infrastructure work"
     assert "DUPLICATE_AUTHORIZATION" in source
+
+
+# --- Codex review round 1 — control-plane closure and post-mutation ownership --
+
+
+def test_executor_refuses_a_decision_from_a_closed_incident():
+    """A spent authorization must not become a mutation minutes later."""
+    from scf.app.executor import _validate
+    from scf.domain.enums import IncidentStatus
+    from scf.domain.state_machine import TERMINAL_STATES
+
+    request = ExecuteRequest(incident_id="INC-1", decision_id="DEC-1")
+    decision = {
+        "incident_id": "INC-1",
+        "decision": "AUTO_ALLOWED",
+        "action_type": "FLIP_TRAFFIC_TO_LAST_GOOD",
+        "target_ref": "dispatch-web",
+        "parameters": {"authorized_target_revision": "dispatch-web-00003-x87"},
+    }
+    for status in TERMINAL_STATES:
+        assert _validate(decision, request, {"status": status.value}) == (
+            f"incident_closed:{status.value}"
+        )
+    # A live incident still passes the closure check.
+    assert _validate(
+        decision, request, {"status": IncidentStatus.EXECUTING.value}
+    ) is None
+
+
+def test_closure_is_checked_before_anything_else():
+    from scf.app.executor import _validate
+
+    source = inspect.getsource(_validate)
+    assert source.index("incident_closed") < source.index("decision_incident_mismatch")
+
+
+def test_execute_loads_the_incident_before_validating():
+    source = inspect.getsource(__import__("scf.app.executor", fromlist=["execute"]).execute)
+    assert source.index("repo.get, request.incident_id") < source.index("_validate(")
+
+
+def test_a_lapsed_lease_is_reacquired_rather_than_treated_as_a_fence():
+    """Losing a lease to nobody is not a fence; the outcome must be recorded."""
+    source = inspect.getsource(__import__("scf.app.executor", fromlist=["execute"]).execute)
+    assert "if state_result == LEASE_LOST:" in source
+    reacquire_at = source.index("if state_result == LEASE_LOST:")
+    receipt_at = source.index("store.record_receipt")
+    assert reacquire_at < receipt_at
+
+
+def test_a_genuinely_fenced_worker_writes_no_receipt():
+    source = inspect.getsource(__import__("scf.app.executor", fromlist=["execute"]).execute)
+    fenced_at = source.index("execution_state_write_fenced")
+    receipt_at = source.index("store.record_receipt")
+    assert fenced_at < receipt_at
+    # The receipt is in the else branch of the fence check, not unconditional.
+    between = source[fenced_at:receipt_at]
+    assert "else:" in between
+
+
+def test_terminalization_accepts_an_unrecorded_but_issued_mutation():
+    from scf.app.executor import TERMINALIZABLE_STATES
+
+    assert TERMINALIZABLE_STATES == {
+        ExecutionState.MUTATION_REQUESTED.value,
+        ExecutionState.MUTATED.value,
+    }
+    for state in (
+        ExecutionState.CLAIMED,
+        ExecutionState.PRECONDITION_CHECKED,
+        ExecutionState.VERIFIED,
+        ExecutionState.FAILED,
+        ExecutionState.STALE,
+    ):
+        assert state.value not in TERMINALIZABLE_STATES
+
+
+def test_only_a_real_mismatch_closes_the_incident():
+    from scf.app import main
+
+    source = inspect.getsource(main._verify_and_close)
+    assert 'terminal.get("reason") == "infrastructure_does_not_match_authorization"' in source
+    escalate_at = source.index("infrastructure_does_not_match_authorization")
+    assert source.index("awaiting_reconciliation", escalate_at) > escalate_at
+
+
+def test_an_unreachable_executor_leaves_the_incident_reconcilable():
+    from scf.app import main
+    from scf.domain.enums import IncidentStatus
+    from scf.domain.state_machine import TERMINAL_STATES, can_transition
+
+    source = inspect.getsource(main._autonomous_remediation)
+    assert 'failure.service == "executor"' in source
+    assert "IncidentStatus.EXECUTION_FAILED" in source
+    assert IncidentStatus.EXECUTION_FAILED not in TERMINAL_STATES
+    # Reconciliation establishes that the mutation landed; it never re-opens
+    # execution. Entry into EXECUTING stays authorization-only.
+    assert can_transition(IncidentStatus.EXECUTION_FAILED, IncidentStatus.EXECUTED)
+    assert not can_transition(IncidentStatus.EXECUTION_FAILED, IncidentStatus.EXECUTING)
+    assert IncidentStatus.EXECUTION_FAILED in main.RECONCILABLE_STATES
+    assert IncidentStatus.REMEDIATION_FAILED in main.RECONCILABLE_STATES
+
+
+def test_reconciliation_walks_a_legal_path_from_either_awaiting_state():
+    from scf.app import main
+    from scf.domain.enums import IncidentStatus
+    from scf.domain.state_machine import can_transition
+
+    walks = {
+        IncidentStatus.EXECUTION_FAILED: [
+            IncidentStatus.EXECUTED,
+            IncidentStatus.VERIFYING,
+            IncidentStatus.RESOLVED,
+        ],
+        IncidentStatus.REMEDIATION_FAILED: [
+            IncidentStatus.VERIFYING,
+            IncidentStatus.RESOLVED,
+        ],
+    }
+    for start, path in walks.items():
+        current = start
+        for step in path:
+            assert can_transition(current, step), f"illegal {current} -> {step}"
+            current = step
+    # And the failure walk out of a reconciled execution attempt.
+    assert can_transition(IncidentStatus.EXECUTING, IncidentStatus.EXECUTION_FAILED)
+    assert can_transition(IncidentStatus.EXECUTION_FAILED, IncidentStatus.ESCALATED)
+    assert main.RECONCILABLE_STATES
+
+
+def test_entry_into_executing_stays_authorization_only():
+    """Reconciliation must never become a second route into execution."""
+    from scf.domain.enums import IncidentStatus
+    from scf.domain.state_machine import LEGAL_TRANSITIONS
+
+    entries = {
+        status
+        for status, targets in LEGAL_TRANSITIONS.items()
+        if IncidentStatus.EXECUTING in targets
+    }
+    assert entries == {IncidentStatus.AUTO_ALLOWED, IncidentStatus.APPROVED}
+
+
+def test_release_is_ownership_bound_and_does_not_terminalize():
+    source = inspect.getsource(execution_store.ExecutionStore.release)
+    assert "@firestore.transactional" in source
+    assert 'current.get("lease_owner") != owner' in source
+    assert '"lease_epoch"' in source
+    assert "FENCED_OUT" in source
+    # It must not close the execution, only give the lease back.
+    assert "ExecutionState.FAILED" not in source
+    assert '"state"' not in source.split("updates = ")[1]
+
+
+def test_a_pre_mutation_refusal_gives_the_lease_back():
+    """Squatting on a lease after refusing would delay a legitimate retry."""
+    source = inspect.getsource(__import__("scf.app.executor", fromlist=["execute"]).execute)
+    release_at = source.index("store.release")
+    refuse_at = source.index("TARGET_NO_LONGER_HEALTHY")
+    mutate_at = source.index("flip_traffic_to_revision")
+    assert release_at < refuse_at < mutate_at
+
+
+def test_a_closed_incident_refusal_still_reports_the_execution_state():
+    """Closure refuses first, but a replay is also a terminal-execution replay."""
+    source = inspect.getsource(__import__("scf.app.executor", fromlist=["execute"]).execute)
+    assert 'problem.startswith("incident_closed")' in source
+    assert "execution_state" in source
+    assert "TERMINAL_EXECUTION_STATES" in source

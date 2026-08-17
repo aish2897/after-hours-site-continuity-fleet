@@ -32,7 +32,13 @@ LEGAL_TRANSITIONS: dict[IncidentStatus, frozenset[IncidentStatus]] = {
     S.DENIED: frozenset({S.ESCALATED}),
     S.APPROVAL_DENIED: frozenset({S.ESCALATED}),
     S.APPROVAL_EXPIRED: frozenset({S.ESCALATED}),
-    S.EXECUTION_FAILED: frozenset({S.ESCALATED}),
+    # Also not terminal, for the same reason as REMEDIATION_FAILED below: if
+    # the executor could not be reached, whether it acted is unknown, and
+    # reconciliation must be able to establish the truth rather than guess.
+    # The edge is to EXECUTED, never back to EXECUTING: entry into EXECUTING
+    # stays reachable only from an authorization state, so reconciliation can
+    # discover that the mutation did land but can never re-open execution.
+    S.EXECUTION_FAILED: frozenset({S.ESCALATED, S.EXECUTED}),
     # REMEDIATION_FAILED is deliberately not terminal. An incident whose
     # infrastructure mutation succeeded but whose verification could not be
     # obtained — the verifier crashed, was unreachable, or timed out — is not

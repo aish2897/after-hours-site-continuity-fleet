@@ -295,6 +295,23 @@ async def _autonomous_remediation(
             error_kind=failure.kind,
         )
         outcome["failed"] = {"service": failure.service, "kind": failure.kind}
+        current = IncidentStatus(
+            (await run_in_threadpool(repo.get, incident_id))["status"]
+        )
+        if failure.service == "executor" and current is IncidentStatus.EXECUTING:
+            # We could not reach the executor, so we do not know whether it
+            # acted. Escalating to a terminal state would close an incident
+            # whose infrastructure outcome is unknown. Stop at EXECUTION_FAILED,
+            # which is reconcilable, and let recovery read reality.
+            await run_in_threadpool(
+                repo.transition,
+                incident_id,
+                IncidentStatus.EXECUTION_FAILED,
+                trace_id=trace_id,
+            )
+            outcome["awaiting_reconciliation"] = True
+            outcome["final_status"] = IncidentStatus.EXECUTION_FAILED.value
+            return outcome
         outcome["final_status"] = await _escalate(repo, incident_id, trace_id)
         return outcome
 
@@ -590,10 +607,19 @@ async def _verify_and_close(
             IncidentStatus.REMEDIATION_FAILED,
             trace_id=trace_id,
         )
-        await run_in_threadpool(
-            repo.transition, incident_id, IncidentStatus.ESCALATED, trace_id=trace_id
-        )
-        outcome["final_status"] = IncidentStatus.ESCALATED.value
+        # Only a genuine mismatch between infrastructure and the authorization
+        # closes the incident. A bookkeeping refusal — the execution record is
+        # not where terminalization expected it — means the outcome is unknown,
+        # not bad, so the incident stays reconcilable rather than being
+        # escalated on the strength of our own record-keeping.
+        if terminal.get("reason") == "infrastructure_does_not_match_authorization":
+            await run_in_threadpool(
+                repo.transition, incident_id, IncidentStatus.ESCALATED, trace_id=trace_id
+            )
+            outcome["final_status"] = IncidentStatus.ESCALATED.value
+        else:
+            outcome["awaiting_reconciliation"] = True
+            outcome["final_status"] = IncidentStatus.REMEDIATION_FAILED.value
         return outcome
 
     await run_in_threadpool(
@@ -601,6 +627,13 @@ async def _verify_and_close(
     )
     outcome["final_status"] = IncidentStatus.RESOLVED.value
     return outcome
+
+
+#: Non-terminal states meaning "a mutation may have happened and we could not
+#: establish the outcome". Neither may be resolved without reading reality.
+RECONCILABLE_STATES = frozenset(
+    {IncidentStatus.REMEDIATION_FAILED, IncidentStatus.EXECUTION_FAILED}
+)
 
 
 @app.post("/incidents/{incident_id}/reconcile")
@@ -623,7 +656,7 @@ async def reconcile_incident(
         raise HTTPException(status_code=404, detail="incident not found") from exc
 
     status = IncidentStatus(document["status"])
-    if status is not IncidentStatus.REMEDIATION_FAILED:
+    if status not in RECONCILABLE_STATES:
         return {"incident_id": incident_id, "status": status.value, "reconciled": False,
                 "reason": "not_awaiting_reconciliation"}
 
@@ -649,6 +682,29 @@ async def reconcile_incident(
             reconciled=bool(receipt.get("reconciled")),
             state=receipt.get("state"),
         )
+
+        if status is IncidentStatus.EXECUTION_FAILED:
+            # The incident never left the execution phase, because we could not
+            # reach the executor to learn the outcome. Reconciliation does not
+            # re-open execution — it establishes what actually happened.
+            if not (receipt.get("mutated") or receipt.get("reconciled")):
+                await run_in_threadpool(
+                    repo.transition,
+                    incident_id,
+                    IncidentStatus.ESCALATED,
+                    trace_id=trace_id,
+                )
+                outcome["final_status"] = IncidentStatus.ESCALATED.value
+                final = await run_in_threadpool(repo.get, incident_id)
+                outcome.update(
+                    {"incident_id": incident_id, "status": final["status"],
+                     "reconciled": False}
+                )
+                return outcome
+            await run_in_threadpool(
+                repo.transition, incident_id, IncidentStatus.EXECUTED, trace_id=trace_id
+            )
+
         await run_in_threadpool(
             repo.transition, incident_id, IncidentStatus.VERIFYING, trace_id=trace_id
         )

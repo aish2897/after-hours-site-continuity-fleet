@@ -160,8 +160,17 @@ Why that is safe rather than merely unlikely:
   persisted decision. It cannot choose a different revision, service, or
   percentage. The effect is therefore identical to the one already authorized —
   effect-idempotent.
-- A cannot record that it acted. The state write is fenced (`FENCED_OUT`,
-  logged at ERROR as `execution_state_write_fenced`).
+- A cannot advance the execution lifecycle state, and it writes no receipt.
+  Both are refused (`FENCED_OUT`) and the attempt is logged at ERROR as
+  `execution_state_write_fenced`. Stated precisely, because A *can* still
+  return a truthful response saying the mutation was issued, which the
+  orchestrator records as an action — that record is accurate, and
+  terminalization is gated on re-observed infrastructure rather than on it.
+- A distinct case is handled separately: if A's own lease merely *lapsed*
+  while the Cloud Run call was in flight and nobody else has taken over, A
+  re-acquires legitimately and records the outcome. Losing a lease to no one
+  is not a fence, and leaving a successful mutation unaccounted for would
+  strand a recovered service inside a failed incident.
 - The next owner does not trust any of that. It re-reads real infrastructure
   and reconciles, so a duplicated identical effect converges rather than
   compounding.
@@ -185,18 +194,25 @@ candidate through its own tag URL and requires both that the approved candidate
 is still the authorized revision and that it answers healthily now.
 
 Live: a real decision was created (the orchestrator was pointed at an
-unreachable executor, so the decision was persisted but never executed), then
-the operator moved the `known-good` tag onto the failing revision.
+unreachable executor, so the decision was persisted but never executed and the
+incident stopped at the non-terminal `EXECUTION_FAILED`), then the operator
+moved the `known-good` tag onto the failing revision.
 
 ```
+incident after unreachable executor   EXECUTION_FAILED   (reconcilable, not closed)
 reason                        TARGET_NO_LONGER_HEALTHY
 detail                        candidate_no_longer_approved
 authorized_target_revision    dispatch-web-00003-x87
 observed_candidate_revision   dispatch-web-00004-jqm
 mutated                       False
-generation before / after     51 / 51
+generation before / after     67 / 67
 live                          HTTP 503 (untouched)
 ```
+
+The refusal also **gives the lease back**. Nothing was mutated and no state
+advanced, so squatting on it until expiry would only delay a legitimate retry.
+Release is ownership-bound like every other write, and leaves the epoch intact
+so the next acquirer still increments past it.
 
 This is a **point-in-time precondition, not a guarantee of future health.**
 The probe-failure branch is covered by contract test rather than live proof,
@@ -240,9 +256,9 @@ exist, which produced a real Google `HTTP 404` — what an unavailable verifier
 looks like from the caller's side. No IAM was changed.
 
 ```
-incident                      INC-20260816-2AE06A
+incident                      INC-20260817-58888B
 execution mutated             True
-resource_version_sent         AAZZKmAMym4
+resource_version_sent         AAZZM2y5ZjY
 live after mutation           HTTP 200, dispatch-web-00003-x87
 downstream failure            verifier / http_404
 incident status               REMEDIATION_FAILED     (NOT resolved, NOT terminal)
@@ -261,12 +277,12 @@ POST /incidents/{id}/reconcile          (names an incident; supplies no authoriz
   verifier                   RECOVERED
   terminalization            ADVANCED -> VERIFIED, serves_authorized_exclusively True
   incident                   RESOLVED
-  generation before/after    41 / 41        no blind second mutation
+  generation before/after    79 / 79        no blind second mutation
 ```
 
 Total infrastructure effect across the entire scenario — the failed run, a
 100-way storm, and recovery — was **one** authorized target transition:
-`generation 40 → 41`.
+`generation 78 → 79`.
 
 ## D3.11 — 100-way same-decision concurrency (Test G)
 
@@ -282,7 +298,7 @@ outcomes                      RECOVERED     1
 mutations                     0
 distinct execution ids        1
 distinct lease epochs         1   (epoch 2)
-generation before / after     41 / 41
+generation before / after     79 / 79
 live                          HTTP 200, dispatch-web-00003-x87
 ```
 
@@ -290,10 +306,17 @@ live                          HTTP 200, dispatch-web-00003-x87
 
 ```
 requests                      100
-outcomes                      ALREADY_FINISHED 100
+outcomes                      incident_closed:RESOLVED  100
+execution states observed     VERIFIED
 mutations                     0
-generation before / after     41 / 41
+generation before / after     79 / 79
 ```
+
+Control-plane closure refuses first — the incident is `RESOLVED`, so its
+decision is spent — and each refusal still reports the terminal `VERIFIED`
+execution underneath it. Both guards are independently live: the execution-plane
+one is proven directly in the store test above, where ten acquisitions against
+a terminal execution all return `ALREADY_FINISHED`.
 
 Reported precisely, because **API attempts are not infrastructure effects**:
 200 executor requests were made; exactly one worker held ownership at a time;
@@ -389,39 +412,91 @@ confirmed `HTTP 503`. **No CLI or operator remediation after submission.**
 
 | Field | Value |
 |---|---|
-| Incident | `INC-20260816-196ECF` |
-| Trace | `b4c4e1fa73d2b00840d4b43c8fa4c16e` |
+| Incident | `INC-20260817-1AF3B8` |
+| Trace | `9d2ed889b0c02f43ee797502bb447caa` |
 | Routing | Gemini 3.7 Flash via ADK → `systems` |
 | Evidence | 12 items, all `TRUSTED_TOOL` |
 | Proposal | `FLIP_TRAFFIC_TO_LAST_GOOD` |
-| Decision | `AUTO_ALLOWED` / `LOW_RISK_TRAFFIC_FLIP`, `DEC-97B9988A57` |
+| Decision | `AUTO_ALLOWED` / `LOW_RISK_TRAFFIC_FLIP`, `DEC-2A75E68170` |
 | Authorized revision | `dispatch-web-00003-x87` |
-| Execution id | `5bcd001a12424…` |
-| Authorization fingerprint | `3235489587f64…` |
+| Execution id | `9490e84ed54b0…` |
+| Authorization fingerprint | `6656963c42132…` |
 | Lease epoch | 1, outcome `ACQUIRED` |
 | Observed pre-state | `dispatch-web-00004-jqm` |
-| `resourceVersion` sent | `AAZZKllu3PU` |
+| `resourceVersion` sent | `AAZZM2jtdWU` |
 | Mutation API | `serving.knative.dev/v1 replaceService` |
-| `resourceVersion` after | `AAZZKlq6xcE` |
-| Verifier | `RECOVERED`, 200, allocation `{00003-x87: 100}`, exclusive `true`, 2 probes |
+| Verifier | `RECOVERED`, 200, allocation `{00003-x87: 100}`, exclusive `true` |
 | Terminalization | `ADVANCED` → `VERIFIED`, exclusive `true` |
 | **Incident** | **`RESOLVED`** |
-| End to end | 18.4 s |
+| End to end | 15.4 s |
 | Audit records | 15, chain verified |
 
-Infrastructure: `HTTP 503 → HTTP 200`, generation `38 → 39`, revisions `4 → 4`,
-`known-good` tag preserved. The run was performed twice, end to end, with the
-same result.
+Infrastructure: `HTTP 503 → HTTP 200`, generation `76 → 77`, revisions `4 → 4`,
+`known-good` tag preserved. The run was performed on every build of this gate,
+end to end, with the same result.
 
 ### Replay
 
 ```
 10 replays of the same executor request
-  outcome  ALREADY_FINISHED   x10
-  state    VERIFIED           x10
-  mutated  false              x10
-generation 39 -> 39
+  reason           incident_closed:RESOLVED   x10
+  execution_state  VERIFIED                   x10
+  terminal         true                       x10
+  mutated          false                      x10
+generation 77 -> 77
 live       HTTP 200, dispatch-web-00003-x87
+```
+
+Two independent guards fire here, and the replay response reports both: the
+incident is closed, so its decision is spent, and the execution underneath it
+is terminal.
+
+## Codex hostile review — round 1
+
+An independent read-only Codex review was run against the working tree, tests,
+diff and this evidence before the gate was reported. It returned **FIX FIRST**
+with two High and two Medium findings. All four were confirmed real and fixed;
+nothing was argued away.
+
+| # | Finding | Fix |
+|---|---|---|
+| High 1 | A lease that lapsed *while the Cloud Run call was in flight* left a successful mutation unrecorded. Terminalization then refused (`execution_not_mutated`) and the incident escalated — a recovered service inside a failed incident. | Losing a lease to nobody is not a fence: the worker re-acquires and records the outcome. Terminalization additionally accepts `MUTATION_REQUESTED`, because what gates it is the re-observed infrastructure, not our bookkeeping. And only a genuine `infrastructure_does_not_match_authorization` closes an incident; a bookkeeping refusal leaves it reconcilable. |
+| High 2 | A decision belonging to an already-escalated incident could still be executed later, if its preconditions happened to hold again. Control-plane closure was not enforced at the mutating boundary. | The executor now reads the incident and refuses any decision whose incident is `RESOLVED` or `ESCALATED` (`incident_closed:<status>`), before binding, ownership, or any infrastructure read. |
+| Medium 1 | The docs claimed a stale worker "cannot record having acted". It still wrote a receipt. | A genuinely fenced worker now writes no receipt, and the claim was narrowed to exactly what the code enforces, in five documents. |
+| Medium 2 | The older D.3A evidence said Firestore fencing "closes" the stale-worker case. It does not. | Corrected in place, with a pointer to the property actually defended. |
+
+Two follow-on defects surfaced while proving the fixes, and were fixed too:
+
+- Re-entering `EXECUTING` from `EXECUTION_FAILED` would have made reconciliation
+  a second route into execution. The state-machine test caught it. The edge is
+  now `EXECUTION_FAILED → EXECUTED`: reconciliation *establishes* that the
+  mutation landed and can never re-open execution. Entry into `EXECUTING`
+  remains reachable only from `AUTO_ALLOWED` or `APPROVED`.
+- A pre-mutation refusal squatted on its lease for the full 120 s, so a
+  legitimate retry was blocked. Refusing before any mutation now releases the
+  lease, ownership-bound, leaving the epoch intact.
+
+### New live proofs from these fixes
+
+**P1 — reconciling an incident whose executor was unreachable:**
+
+```
+executor pointed at a dead host    incident -> EXECUTION_FAILED  (not escalated)
+candidate restored, POST /incidents/{id}/reconcile
+  execution mutated               True
+  verifier                        RECOVERED
+  terminalization                 VERIFIED
+  incident                        RESOLVED
+  generation before / after       68 / 69     exactly one effect
+  live                            HTTP 200, dispatch-web-00003-x87
+```
+
+**P2 — a decision belonging to a closed incident:**
+
+```
+reason                      incident_closed:RESOLVED
+mutated                     False
+generation before / after   69 / 69
 ```
 
 ## IAM and Gate D.1 regression (Tests N, O)
@@ -450,7 +525,7 @@ its own claim.
 
 ## Tests
 
-**Offline: 250 passed, 11 skipped** — including 53 new Gate D.3 contract tests
+**Offline: 263 passed, 11 skipped** — including 66 new Gate D.3 contract tests
 covering epoch issuance, the five-condition compare-and-set, fence ordering
 around the Cloud Run read, the whole replacement-body builder (image, runtime
 identity, environment, ingress, scaling, labels, tag preservation, revision
@@ -460,8 +535,9 @@ truncation, and fingerprint uniqueness.
 
 **Live decisive tests:** stale-owner fencing, epoch takeover, 409 ABORTED on a
 stale `resourceVersion`, authorized mutation, no config/revision drift,
-candidate-freshness refusal, three verifier negatives plus a control, verifier
-crash and reconciliation, two 100-way concurrency storms, terminal replay, both
+candidate-freshness refusal and lease release, three verifier negatives plus a
+control, verifier crash and reconciliation, executor-unreachable reconciliation,
+closed-incident refusal, two 100-way concurrency storms, terminal replay, both
 IAM regressions, and the full autonomous 503 → 200 run.
 
 ## Honest limitations after Gate D.3
@@ -472,7 +548,7 @@ IAM regressions, and the full autonomous 503 → 200 run.
 2. **The stale-worker window is narrowed, not eliminated.** A fenced worker
    that already passed its final ownership check can still reach Cloud Run if
    the Service has not changed. It can only apply the same authorized effect,
-   and it cannot record having done so.
+   and it cannot advance the execution lifecycle state or write a receipt.
 3. **Audit is tamper-evident, not immutable.** A compromised authoritative
    writer could rewrite the chain and the tail metadata together.
 4. **Control-plane compromise is only partly addressed.** The fingerprint

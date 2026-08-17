@@ -38,7 +38,13 @@ from fastapi import FastAPI, Header
 from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel, ConfigDict, Field
 
-from scf.domain.enums import ActionState, ActionType, Decision, ExecutionState
+from scf.domain.enums import (
+    ActionState,
+    ActionType,
+    Decision,
+    ExecutionState,
+    IncidentStatus,
+)
 from scf.domain.ids import (
     derive_authorization_fingerprint,
     derive_execution_id,
@@ -53,13 +59,23 @@ from scf.executor.cloud_run import (
 )
 from scf.obs import log_event, trace_id_from_header
 from scf.policy import default_policy, default_registry
-from scf.state import DecisionNotFound, ExecutionStore, IncidentRepository
+from scf.domain.state_machine import TERMINAL_STATES as CLOSED_INCIDENT_STATES
+from scf.state import (
+    DecisionNotFound,
+    ExecutionStore,
+    IncidentNotFound,
+    IncidentRepository,
+)
+from scf.state.execution_store import TERMINAL_STATES as TERMINAL_EXECUTION_STATES
 from scf.state.execution_store import (
+    ACQUIRED,
     ADVANCED,
     ALREADY_FINISHED,
     ALREADY_TERMINAL,
     CONFLICT,
     HELD_BY_OTHER,
+    LEASE_LOST,
+    RECOVERED,
 )
 from scf.tools.cloud_run_evidence import (
     KNOWN_GOOD_TAG,
@@ -83,6 +99,12 @@ PRE_MUTATION_STATES = (
     ExecutionState.PRECONDITION_CHECKED,
     ExecutionState.MUTATION_REQUESTED,
     ExecutionState.MUTATED,
+)
+
+#: States a successful verification may close. Both mean the mutation was
+#: issued; only the bookkeeping differs.
+TERMINALIZABLE_STATES = frozenset(
+    {ExecutionState.MUTATION_REQUESTED.value, ExecutionState.MUTATED.value}
 )
 
 
@@ -139,8 +161,23 @@ def health() -> dict[str, Any]:
     }
 
 
-def _validate(decision: dict[str, Any], request: ExecuteRequest) -> str | None:
-    """Every check reads the stored decision, never the request body."""
+def _validate(
+    decision: dict[str, Any],
+    request: ExecuteRequest,
+    incident: dict[str, Any] | None = None,
+) -> str | None:
+    """Every check reads stored authoritative state, never the request body.
+
+    Control-plane closure is enforced here, at the boundary that mutates. Once
+    the orchestrator has driven an incident to a terminal state, its decisions
+    are spent: a decision left over from a run that already failed and escalated
+    must not become an infrastructure change minutes later just because its
+    preconditions happen to hold again.
+    """
+    if incident is not None:
+        status = incident.get("status")
+        if status in {s.value for s in CLOSED_INCIDENT_STATES}:
+            return f"incident_closed:{status}"
     if decision.get("incident_id") != request.incident_id:
         return "decision_incident_mismatch"
     if decision.get("revoked"):
@@ -255,7 +292,12 @@ async def execute(
     except DecisionNotFound:
         return _refuse("decision_not_found", decision_id=request.decision_id)
 
-    problem = _validate(decision, request)
+    try:
+        incident = await run_in_threadpool(repo.get, request.incident_id)
+    except IncidentNotFound:
+        return _refuse("incident_not_found", incident_id=request.incident_id)
+
+    problem = _validate(decision, request, incident)
     if problem:
         log_event(
             "execution_refused",
@@ -265,7 +307,26 @@ async def execute(
             decision_id=request.decision_id,
             reason=problem,
         )
-        return _refuse(problem, decision_id=request.decision_id)
+        extra: dict[str, Any] = {}
+        if problem.startswith("incident_closed"):
+            # Report the execution's own state too. Control-plane closure is
+            # the stronger rule and refuses first, but a replay against a
+            # closed incident is also a replay against a terminal execution,
+            # and both facts are worth having on the record.
+            try:
+                closed_id, _ = _identity(
+                    decision, request.incident_id, request.decision_id
+                )
+                closed = await run_in_threadpool(execution().get, closed_id)
+                extra = {
+                    "execution_id": closed_id,
+                    "execution_state": (closed or {}).get("state"),
+                    "terminal": (closed or {}).get("state")
+                    in {s.value for s in TERMINAL_EXECUTION_STATES},
+                }
+            except (KeyError, TypeError):  # decision lacks the parameters
+                extra = {}
+        return _refuse(problem, decision_id=request.decision_id, **extra)
 
     params = decision["parameters"]
     target_ref = decision["target_ref"]
@@ -434,6 +495,12 @@ async def execute(
     # answering.
     stale_candidate = _candidate_is_fresh(observed, authorized_revision)
     if stale_candidate:
+        # Nothing was mutated and no state advanced, so holding the lease until
+        # it expires would only delay a legitimate retry once the candidate is
+        # healthy again.
+        await run_in_threadpool(
+            store.release, execution_id, owner=owner, lease_epoch=epoch
+        )
         log_event(
             "execution_target_no_longer_healthy",
             severity="WARNING",
@@ -536,18 +603,61 @@ async def execute(
     action.error = None if accepted else str(mutation.get("error"))[:400]
     action.finished_at = utc_now()
 
+    final_state = ExecutionState.MUTATED if accepted else ExecutionState.FAILED
     state_result, _ = await run_in_threadpool(
         _advance,
-        ExecutionState.MUTATED if accepted else ExecutionState.FAILED,
+        final_state,
         expect_states=(ExecutionState.MUTATION_REQUESTED,),
         action_id=action_id,
         accepted=accepted,
         resource_version_after=mutation.get("resource_version_after"),
     )
+
+    if state_result == LEASE_LOST:
+        # Our own lease lapsed while the Cloud Run call was in flight, and
+        # nobody else has taken over. That is not a fence — re-acquiring is
+        # legitimate, and recording what actually happened is strictly better
+        # than leaving a successful mutation unaccounted for.
+        retake, retaken = await run_in_threadpool(
+            store.acquire,
+            execution_id,
+            owner=WORKER_ID,
+            incident_id=request.incident_id,
+            decision_id=request.decision_id,
+            action_type=decision["action_type"],
+            target_ref=target_ref,
+            authorized_target_revision=authorized_revision,
+            expected_source_revision=expected_source,
+            expected_etag=expected_etag,
+        )
+        if retake in (ACQUIRED, RECOVERED):
+            epoch = int((retaken or {}).get("lease_epoch") or 0)
+            base["lease_epoch"] = epoch
+            base["lease_reacquired_after_mutation"] = True
+            state_result, _ = await run_in_threadpool(
+                _advance,
+                final_state,
+                expect_states=(ExecutionState.MUTATION_REQUESTED,),
+                action_id=action_id,
+                accepted=accepted,
+                resource_version_after=mutation.get("resource_version_after"),
+            )
+        log_event(
+            "execution_lease_lapsed_during_mutation",
+            severity="WARNING",
+            trace_id=trace_id,
+            incident_id=request.incident_id,
+            execution_id=execution_id,
+            reacquire=retake,
+            state_result=state_result,
+        )
+
     if state_result != ADVANCED:
-        # The mutation was issued but we could not record it: our lease was
-        # taken while the call was in flight. Reported honestly rather than
-        # papered over; reconciliation will observe the real infrastructure.
+        # A newer owner exists. We issued the mutation but must not claim it:
+        # no receipt is written, and the lifecycle state stays whatever the
+        # current owner says it is. Terminalization is gated on re-observed
+        # infrastructure, so the authorized effect is still accounted for by
+        # whoever holds the execution.
         log_event(
             "execution_state_write_fenced",
             severity="ERROR",
@@ -558,12 +668,12 @@ async def execute(
             mutation_accepted=accepted,
         )
         base["state_write_fenced"] = state_result
-
-    await run_in_threadpool(
-        store.record_receipt,
-        action_id,
-        {**action.model_dump(mode="json"), "incident_id": request.incident_id},
-    )
+    else:
+        await run_in_threadpool(
+            store.record_receipt,
+            action_id,
+            {**action.model_dump(mode="json"), "incident_id": request.incident_id},
+        )
 
     log_event(
         "action_executed",
@@ -637,7 +747,12 @@ async def terminalize(
         return _refuse("execution_not_found", **base)
     if current.get("state") == ExecutionState.VERIFIED.value:
         return {"verified": True, "terminal": True, "outcome": ALREADY_TERMINAL, **base}
-    if current.get("state") != ExecutionState.MUTATED.value:
+    # MUTATION_REQUESTED counts as well as MUTATED. A mutation whose success we
+    # failed to record — because our lease lapsed while the API call was in
+    # flight — is still a mutation, and refusing to close it would strand a
+    # genuinely recovered service in a failed incident. What actually gates
+    # this transition is the re-observation below, not our own bookkeeping.
+    if current.get("state") not in TERMINALIZABLE_STATES:
         return _refuse("execution_not_mutated", **base)
 
     described = await run_in_threadpool(describe_service, target_ref)
@@ -668,6 +783,7 @@ async def terminalize(
         store.terminalize,
         execution_id,
         ExecutionState.VERIFIED,
+        expect_states=(ExecutionState.MUTATION_REQUESTED, ExecutionState.MUTATED),
         verified_at=utc_now(),
         verified_traffic_allocation=allocation,
         verified_http_status=status_code,

@@ -221,7 +221,12 @@ alone.** A worker that loses its lease after its final ownership check can
 still reach the Cloud Run API if the Service has not changed in the interim.
 It can only ever request the exact `authorized_target_revision` from the
 persisted decision, so the effect is identical to the one already authorized,
-and it cannot record having acted. This is stated rather than denied.
+and it cannot advance the execution lifecycle state or write a receipt: the
+fenced write is refused and logged at ERROR as `execution_state_write_fenced`.
+What it can still do is return a truthful response saying the mutation was
+issued, which the orchestrator records as an action — that record is accurate,
+and terminalization is gated on re-observed infrastructure rather than on it.
+This is stated rather than denied.
 
 Execution documents are never deleted, and the executor holds no delete
 permission, so a claim cannot be retracted to manufacture a retry. One

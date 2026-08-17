@@ -174,6 +174,12 @@ Still **not** claimed:
 
 OCC narrows, but does not by itself eliminate, the stale-worker window: a
 worker that read version B, was fenced out, and then submitted using B could
-still succeed if nothing else advanced the Service in between. Fencing in
-Firestore is what closes that case, which is why D.3 needs both layers rather
-than either alone.
+still succeed if nothing else advanced the Service in between.
+
+**Correction, recorded after Gate D.3 was implemented:** an earlier draft of
+this note said Firestore fencing "closes that case". It does not. Fencing stops
+a stale worker advancing execution state, writing a receipt, or terminalizing —
+it does not stop it reaching the Cloud Run API. The window is narrowed by both
+layers and closed by neither alone. See the D3.5 section of
+[`gate-d3-lease-fencing-cas.md`](gate-d3-lease-fencing-cas.md) for the property
+that is actually defended.

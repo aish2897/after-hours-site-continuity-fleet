@@ -241,6 +241,39 @@ class ExecutionStore:
 
         return _renew(transaction)
 
+    def release(
+        self, execution_id: str, *, owner: str, lease_epoch: int
+    ) -> tuple[str, dict[str, Any] | None]:
+        """Give up a lease the caller holds, without terminalizing.
+
+        Used when a worker refuses *before* issuing any mutation — nothing was
+        done, so squatting on the lease until it expires only delays a
+        legitimate retry. Ownership-bound like every other write, so it cannot
+        be used to evict a newer owner, and the epoch is left intact so the
+        next acquirer still increments past this one.
+        """
+        ref = self._ref(execution_id)
+        transaction = self._db.transaction()
+
+        @firestore.transactional
+        def _release(tx: firestore.Transaction) -> tuple[str, dict[str, Any] | None]:
+            snapshot = ref.get(transaction=tx)
+            if not snapshot.exists:
+                return NOT_FOUND, None
+            current = snapshot.to_dict()
+            if current.get("state") in _TERMINAL_VALUES:
+                return ALREADY_TERMINAL, current
+            if current.get("lease_owner") != owner or int(
+                current.get("lease_epoch") or 0
+            ) != int(lease_epoch):
+                return FENCED_OUT, current
+            now = utc_now()
+            updates = {"lease_expires_at": now, "updated_at": now}
+            tx.update(ref, updates)
+            return ADVANCED, {**current, **updates}
+
+        return _release(transaction)
+
     # --- state -----------------------------------------------------------------
 
     def advance(

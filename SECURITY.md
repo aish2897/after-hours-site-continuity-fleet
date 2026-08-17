@@ -111,8 +111,13 @@ Stated plainly rather than implied away.
    check can still reach the Cloud Run API if the Service has not changed in
    the interim. It can only ever request the exact `authorized_target_revision`
    from the persisted decision, so the effect is identical to the one already
-   authorized, and it cannot record having acted. Two systems that cannot be
-   committed together leave this window; it is documented, not denied.
+   authorized. It cannot advance the execution lifecycle state and cannot
+   write a receipt — both writes are fenced and the attempt is logged at ERROR.
+   It can still return a truthful response saying the mutation was issued, and
+   the orchestrator records that as an action; the record is accurate, and
+   terminalization is gated on re-observed infrastructure rather than on it.
+   Two systems that cannot be committed together leave this window; it is
+   documented, not denied.
 7. **Cloud Run v2 `etag` is not a concurrency control.** Tested live against
    the real service, a stale etag in the body, a stale `If-Match:` header and a
    bogus etag string were all accepted with HTTP 200 on the traffic update. The

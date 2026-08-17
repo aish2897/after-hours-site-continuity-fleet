@@ -66,6 +66,8 @@ capability beyond the state recorded here.
 | Candidate re-probed immediately before mutating | **`VERIFIED`** | [`gate-d3`](docs/evidence/gate-d3-lease-fencing-cas.md) |
 | Audit truncation detected against incident tail metadata | **`VERIFIED`** | [`gate-d3`](docs/evidence/gate-d3-lease-fencing-cas.md) |
 | One authorization fingerprint → one execution identity | **`VERIFIED`** | [`gate-d3`](docs/evidence/gate-d3-lease-fencing-cas.md) |
+| Closed incident cannot be re-executed | **`VERIFIED`** | [`gate-d3`](docs/evidence/gate-d3-lease-fencing-cas.md) |
+| Reconciliation after an unreachable executor | **`VERIFIED`** | [`gate-d3`](docs/evidence/gate-d3-lease-fencing-cas.md) |
 | Deterministic policy gate | `IMPLEMENTED` | `tests/policy/test_decision_matrix.py` — 26 |
 | Agent capability registry | `IMPLEMENTED` | `tests/policy/test_registry.py` — 9 |
 | Incident state machine | `IMPLEMENTED` | `tests/unit/test_state_machine.py` — 15 |
@@ -88,8 +90,8 @@ Boundaries of the claim, stated precisely:
   cannot advance execution state, and a stale Cloud Run snapshot is rejected by
   Google with 409 ABORTED — but a worker that lost its lease after its final
   ownership check can still reach the API if the service has not changed. It
-  can only apply the same authorized effect, and it cannot record having done
-  so. See [`SECURITY.md`](SECURITY.md).
+  can only apply the same authorized effect, and it cannot advance the
+  execution lifecycle state or write a receipt. See [`SECURITY.md`](SECURITY.md).
 - **Cloud Run v2 `etag` is not a concurrency control** for the traffic update;
   proven live. The executor mutates through v1 `replaceService`, where
   `resourceVersion` is genuinely enforced.
