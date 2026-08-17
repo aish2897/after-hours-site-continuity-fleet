@@ -27,7 +27,7 @@ The point to land: **one** of four specialists is invoked, and the declines are
 reasoned. The model rules out network because the report says phones and wifi
 are fine. This is delegation, not fan-out.
 
-## 1:10–2:00 — Governed remediation *(pending Gate B + dispatch-web)*
+## 1:10–2:00 — Governed remediation *(VERIFIED — gate-d, gate-d3)*
 
 - Systems Investigator gathers trusted evidence from a real Cloud Run service.
 - It proposes a remediation from a closed enum.
@@ -36,7 +36,7 @@ are fine. This is delegation, not fan-out.
 - `dispatch-web` genuinely goes 503 → 200.
 - Verification runs under a different, read-only identity.
 
-## 2:00–2:45 — The boundary is Google's, not ours *(pending IAM proofs)*
+## 2:00–2:45 — The boundary is Google's, not ours *(VERIFIED — gate-c)*
 
 Three real, Google-generated results:
 
@@ -48,11 +48,16 @@ Three real, Google-generated results:
 C is the one that matters: the boundary is scoped to a resource, not merely to
 an identity.
 
-## 2:45–3:20 — Replay and audit *(pending Firestore)*
+## 2:45–3:20 — Replay and audit *(VERIFIED — gate-d2, gate-d3)*
 
-Deliver the same execution request three times. Show exactly one mutation and
-two duplicate suppressions in persisted action and audit state. Then show the
-hash-chained audit trail failing verification after a single record is edited.
+Deliver the same execution request ten times. Show exactly one mutation and
+nine refusals in persisted execution and audit state — the incident is closed
+and the execution is terminal, and the response says both. Then show the
+hash-chained audit trail failing verification after a single record is edited,
+and after the tail is truncated.
+
+If time allows, the strongest single frame: a stale `resourceVersion` refused by
+Google with `HTTP 409 ABORTED` while the traffic does not move.
 
 ## 3:20–4:00 — Google Cloud proof
 

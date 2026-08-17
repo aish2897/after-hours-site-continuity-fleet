@@ -847,11 +847,12 @@ async def terminalize(
         return _refuse("execution_not_found", **base)
     if current.get("state") == ExecutionState.VERIFIED.value:
         return {"verified": True, "terminal": True, "outcome": ALREADY_TERMINAL, **base}
-    # MUTATION_REQUESTED counts as well as MUTATED. A mutation whose success we
-    # failed to record — because our lease lapsed while the API call was in
-    # flight — is still a mutation, and refusing to close it would strand a
-    # genuinely recovered service in a failed incident. What actually gates
-    # this transition is the re-observation below, not our own bookkeeping.
+    # MUTATED only. `MUTATION_REQUESTED` is written *before* the Cloud Run call,
+    # so accepting it would let an execution be closed as VERIFIED on the
+    # strength of a healthy service some other actor produced. A mutation whose
+    # success write was fenced is converted to MUTATED by reconciliation, which
+    # observes that the authorized target really is live, and the incident stays
+    # reconcilable until it does — so nothing is stranded by being strict here.
     if current.get("state") not in TERMINALIZABLE_STATES:
         return _refuse("execution_not_mutated", **base)
 

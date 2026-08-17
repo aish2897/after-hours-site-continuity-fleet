@@ -2,14 +2,18 @@
 
 Dedicated personal competition project. Frozen decisions, not open options.
 
+**This file is a setup checklist, not a capability claim.** The authoritative
+record of what is and is not integrated is the integration-status table in
+`README.md`; where the two ever disagree, the README wins.
+
 ## Locations (decided, not to be re-litigated)
 
 | Concern | Location | Status |
 |---|---|---|
-| Cloud Run | `australia-southeast1` Sydney | pending |
-| Firestore | `australia-southeast1` Sydney | pending |
-| Artifact Registry | `australia-southeast1` Sydney | pending |
-| Model Armor | `australia-southeast2` Melbourne | pending |
+| Cloud Run | `australia-southeast1` Sydney | **done** |
+| Firestore | `australia-southeast1` Sydney | **done** (two databases) |
+| Artifact Registry | `australia-southeast1` Sydney | **done** |
+| Model Armor | `australia-southeast2` Melbourne | PLANNED, not integrated |
 | Gemini 3.7 Flash inference | `global` | **done** |
 
 Gemini 3.7 Flash is not available through an Australian regional inference
@@ -33,10 +37,10 @@ service-account key JSON files.**
 Enable only what the current gate needs.
 
 - [x] `aiplatform.googleapis.com` — Gate A
-- [ ] `run.googleapis.com` — Gate B
-- [ ] `firestore.googleapis.com` — Gate B
-- [ ] `cloudbuild.googleapis.com` — Gate B, source deploys
-- [ ] `artifactregistry.googleapis.com` — Gate B
+- [x] `run.googleapis.com` — Gate B
+- [x] `firestore.googleapis.com` — Gate B
+- [x] `cloudbuild.googleapis.com` — Gate B, source deploys
+- [x] `artifactregistry.googleapis.com` — Gate B
 - [ ] `secretmanager.googleapis.com` — approval signing key, slice 2
 - [ ] `modelarmor.googleapis.com` — after the first remediation path
 - [x] `logging.googleapis.com`, `cloudtrace.googleapis.com` — already enabled

@@ -633,7 +633,7 @@ its own claim.
 
 ## Tests
 
-**Offline: 272 passed, 11 skipped** — including 75 new Gate D.3 contract tests
+**Offline: 279 passed, 11 skipped** — including 82 Gate D.3 contract tests
 covering epoch issuance, the five-condition compare-and-set, fence ordering
 around the Cloud Run read, the whole replacement-body builder (image, runtime
 identity, environment, ingress, scaling, labels, tag preservation, revision
