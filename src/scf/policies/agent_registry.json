@@ -1,6 +1,6 @@
 {
   "registry_version": "1.0.0",
-  "description": "Runtime registry. Loaded at startup and used to gate tool dispatch. The in-process check is defence in depth only; the authoritative boundary is Google IAM at the Cloud Run service level.",
+  "description": "Runtime registry. Loaded at startup and used to gate tool dispatch. The in-process check is defence in depth only; the authoritative boundary is Google IAM at the Cloud Run service level. `llm_backed` describes what the runtime actually does today, not what the contract permits: the Systems Investigator's evidence and proposal are deterministic, so it is false. `may_propose_actions` remains a capability statement.",
   "agents": {
     "orchestrator": {
       "version": "1.0.0",
@@ -17,7 +17,7 @@
     },
     "systems": {
       "version": "1.0.0",
-      "llm_backed": true,
+      "llm_backed": false,
       "service_account": "sa-agent-systems",
       "may_propose_actions": true,
       "may_write_firestore": false,

@@ -31,6 +31,12 @@ Proven by `tests/policy/test_decision_matrix.py`:
 Gemini may interpret reports, choose which specialists to invoke and say why,
 summarize evidence, and emit a `Proposal`.
 
+**Today Gemini only routes.** The remediation proposal is produced
+deterministically by the Systems Investigator from trusted evidence. The
+constraints below are written for an LLM-authored proposal and are proven
+against one — Gate E drives a hallucinated `EXPORT_CREDENTIALS` through this
+path and the gate refuses it — but the runtime does not yet exercise it.
+
 The `Proposal` schema is closed: `action_type` must be a member of
 `ActionType`, `target_ref` must resolve in `policies/action_policy.json`, and
 `confidence` is bounded. A malformed proposal is rejected and audited, never

@@ -953,9 +953,10 @@ def test_a_json_health_body_is_read_structurally(body, healthy):
 def test_the_health_predicate_reads_the_value_not_the_key_name():
     from scf.tools import cloud_run_evidence
 
-    source = inspect.getsource(cloud_run_evidence.body_is_healthy)
-    assert "json.loads" in source
-    assert "isinstance(value, bool)" in source
+    assert "json.loads" in inspect.getsource(cloud_run_evidence.body_is_healthy)
+    assert "isinstance(value, bool)" in inspect.getsource(
+        cloud_run_evidence._collect_health_verdicts
+    )
 
 
 def test_reconciliation_reads_the_executor_through_the_contract_too():
@@ -1055,3 +1056,69 @@ def test_the_docs_do_not_claim_an_llm_authored_proposal():
     source = inspect.getsource(cloud_run_evidence.propose_remediation)
     for llm in ("LlmAgent", "generate_content", "route_incident", "runner"):
         assert llm not in source
+
+
+# --- Codex Gate E audit, round 5 ---------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "body,healthy",
+    [
+        # A nested check contradicts a healthy top level.
+        ('{"ok": true, "checks": {"db": {"state": "failed"}}}', False),
+        ('{"ok": true, "checks": [{"state": "failed"}]}', False),
+        ('{"healthy": true, "checks": {"db": {"state": "ok"}}}', True),
+        # Duplicate keys: JSON keeps the last, so the raw text is the veto.
+        ('{"healthy": false, "healthy": true}', False),
+        # A negative word anywhere vetoes a structurally healthy body.
+        ('{"healthy": true, "note": "database unavailable"}', False),
+    ],
+)
+def test_a_nested_or_duplicated_contradiction_fails_closed(body, healthy):
+    from scf.tools.cloud_run_evidence import body_is_healthy
+
+    assert body_is_healthy(body) is healthy
+
+
+def test_health_verdicts_are_collected_at_any_depth():
+    from scf.tools.cloud_run_evidence import _collect_health_verdicts
+
+    assert _collect_health_verdicts(
+        {"ok": True, "checks": {"db": {"state": "failed"}}}
+    ) == [True, False]
+    assert _collect_health_verdicts({"nothing": "here"}) == []
+
+
+def test_the_registry_describes_the_runtime_not_the_contract():
+    """`llm_backed` must match what the service actually does."""
+    from scf.policy import default_registry
+
+    registry = default_registry()
+    systems = registry.agents["systems"]
+    assert systems.llm_backed is False, (
+        "the Systems Investigator's evidence and proposal are deterministic today"
+    )
+    # The capability statement is unchanged: it MAY propose, and the gate refuses.
+    assert systems.may_propose_actions is True
+    assert registry.agents["orchestrator"].llm_backed is True
+
+
+def test_no_document_still_claims_an_unconditional_llm_proposal():
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[2]
+    readme = " ".join((root / "README.md").read_text(encoding="utf-8").lower().split())
+    assert "llms investigate and propose. deterministic code decides" not in readme
+
+    security = " ".join((root / "SECURITY.md").read_text(encoding="utf-8").lower().split())
+    assert "today gemini only routes" in security
+
+
+def test_the_readme_does_not_claim_a_boundary_that_does_not_exist():
+    """ARCHITECTURE was honest about this; README was the stale surface."""
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[2]
+    readme = " ".join((root / "README.md").read_text(encoding="utf-8").lower().split())
+    assert "an explicit classification and security boundary governs" not in readme
+    assert "there is no classification or inspection step today" in readme

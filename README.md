@@ -155,9 +155,15 @@ has no Sydney endpoint either. Model inference is therefore performed through
 Vertex AI's `global` endpoint as a deliberate, documented architecture choice.
 
 **Complete Australian data residency is not claimed.** The competition
-environment uses synthetic data only. Sensitive or policy-restricted content
-must never be silently sent to the global endpoint; an explicit classification
-and security boundary governs what crosses it.
+environment uses synthetic data only.
+
+**There is no classification or inspection step today.** The duty manager's
+report text is passed to the routing agent, and therefore to the `global`
+endpoint, uninspected. A boundary that decides what may cross is the intended
+design and is **PLANNED, NOT INTEGRATED** — see
+[`ARCHITECTURE.md`](ARCHITECTURE.md). What does hold is narrower: untrusted
+text is recorded as `UNTRUSTED_INPUT` and can never satisfy a policy
+condition, which protects the *authorization* path and nothing more.
 
 Pub/Sub is deliberately excluded. Replay and duplicate-delivery proof is done
 by repeated delivery against Firestore-backed deterministic idempotency.
@@ -186,7 +192,9 @@ $env:SCF_LIVE=1; .\.venv\Scripts\python.exe -m pytest tests/e2e
 
 - Synthetic company, sites, users, and logs only. No employer data, code,
   names, policies, addresses, configurations, or IP.
-- LLMs investigate and propose. Deterministic code decides every mutation.
+- An LLM may investigate and propose; it never authorizes. Deterministic code
+  decides every mutation. (Today the LLM only routes — see the golden rule
+  section above.)
 - Untrusted text never reaches an authorization path.
 - Every mutating action carries an incident id, action id, deterministic
   idempotency key, executor identity, evidence snapshot, and policy decision.

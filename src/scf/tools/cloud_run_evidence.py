@@ -101,6 +101,39 @@ _UNHEALTHY_PHRASES = ("not healthy", "not ok", "not ready", "not serving")
 _HEALTH_KEYS = ("healthy", "ok", "ready", "serving", "status", "state")
 
 
+def _text_is_negative(text: str) -> bool:
+    """Does the raw body contain an explicit failure marker anywhere?"""
+    if any(phrase in text for phrase in _UNHEALTHY_PHRASES):
+        return True
+    return bool(set(re.findall(r"[a-z]+", text)) & _UNHEALTHY_WORDS)
+
+
+def _collect_health_verdicts(payload: Any) -> list[bool]:
+    """Every recognised health key in the structure, at any depth.
+
+    A health endpoint that reports per-dependency detail keeps its verdicts in
+    nested objects. Looking only at the top level means a body can announce
+    `ok: true` while a nested check says it has failed.
+    """
+    verdicts: list[bool] = []
+    if isinstance(payload, dict):
+        for key, value in payload.items():
+            if key in _HEALTH_KEYS:
+                if isinstance(value, bool):
+                    verdicts.append(value)
+                elif isinstance(value, str):
+                    verdicts.append(_text_is_healthy(value.strip().lower()))
+                elif not isinstance(value, (dict, list)):
+                    # A non-boolean, non-string health value asserts nothing,
+                    # and guessing at it would be exactly the wrong instinct.
+                    verdicts.append(False)
+            verdicts.extend(_collect_health_verdicts(value))
+    elif isinstance(payload, list):
+        for item in payload:
+            verdicts.extend(_collect_health_verdicts(item))
+    return verdicts
+
+
 def _text_is_healthy(text: str) -> bool:
     """Word-level reading of a plain-text health body."""
     if not text:
@@ -137,27 +170,18 @@ def body_is_healthy(body: str) -> bool:
     except ValueError:
         payload = None
 
-    if isinstance(payload, dict):
-        verdicts = []
-        for key in _HEALTH_KEYS:
-            if key not in payload:
-                continue
-            value = payload[key]
-            if isinstance(value, bool):
-                verdicts.append(value)
-            elif isinstance(value, str):
-                verdicts.append(_text_is_healthy(value.strip().lower()))
-            else:
-                # A non-boolean, non-string health value asserts nothing, and
-                # guessing at it would be exactly the wrong instinct.
-                verdicts.append(False)
-        if verdicts:
-            # EVERY recognised health key must agree. Returning on the first
-            # one read `{"ok": true, "state": "failed"}` as healthy, because
-            # `ok` was checked before `state` and the failure was never looked
-            # at. When a body contradicts itself, the pessimistic reading is
-            # the only safe one.
-            return all(verdicts)
+    verdicts = _collect_health_verdicts(payload)
+    if verdicts:
+        # EVERY recognised health key must agree, at any depth. Reading only the
+        # first one called `{"ok": true, "state": "failed"}` healthy; reading
+        # only the top level called `{"ok": true, "checks": {"db": {"state":
+        # "failed"}}}` healthy. A body that contradicts itself anywhere gets
+        # the pessimistic reading.
+        #
+        # The raw text is also scanned as a veto. That catches what structure
+        # alone cannot — duplicate keys, where JSON parsing silently keeps the
+        # last one and the contradiction disappears before we ever see it.
+        return all(verdicts) and not _text_is_negative(text)
 
     return _text_is_healthy(text)
 
