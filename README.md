@@ -71,7 +71,7 @@ capability beyond the state recorded here.
 | An attempted execution never mutates twice | **`VERIFIED`** | [`gate-d3`](docs/evidence/gate-d3-lease-fencing-cas.md) |
 | Deterministic policy gate | **`VERIFIED`** | [`gate-d`](docs/evidence/gate-d-autonomous-recovery.md) · [`gate-d3`](docs/evidence/gate-d3-lease-fencing-cas.md) — authorized every live run |
 | Agent capability registry | `IMPLEMENTED` | `tests/policy/test_registry.py` — 9 |
-| Incident state machine | **`VERIFIED`** | [`gate-d3`](docs/evidence/gate-d3-lease-fencing-cas.md) — every live run walks it; illegal transitions refused |
+| Incident state machine | **`VERIFIED`** | [`gate-d3`](docs/evidence/gate-d3-lease-fencing-cas.md) — every live run walks it end to end; illegal-transition refusal is offline-tested |
 | Deterministic idempotency keys | **`VERIFIED`** | [`gate-d2`](docs/evidence/gate-d2-execution-correctness.md) · [`gate-d3`](docs/evidence/gate-d3-lease-fencing-cas.md) — one identity across 200 requests |
 | Hash-chained audit + tamper detection | **`VERIFIED`** | [`gate-d3`](docs/evidence/gate-d3-lease-fencing-cas.md) — chains verified against live incidents |
 | Trusted/untrusted evidence separation | `IMPLEMENTED` | `tests/policy/test_decision_matrix.py` |
