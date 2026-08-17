@@ -580,6 +580,13 @@ than the code:
   `MUTATION_REQUESTED`, and the execution remains marked as attempted. That
   outcome is now reported as `conflict_rewind` and `retryable: false` rather
   than assumed.
+- A successful rewind also **releases the lease**. Round 5 pointed out that
+  declaring a conflict retryable while still holding the lease made the retry
+  depend on waiting two minutes for expiry: an immediate `/reconcile` got
+  `HELD_BY_OTHER`, which is not a retryable conflict, and escalated the
+  incident over a call that changed nothing. The lease is released only when
+  the rewind succeeded — an execution still marked as attempted keeps its
+  lease, rather than inviting the second attempt refused everywhere else.
 - "Retry is still possible" is a statement about the *execution record*, not a
   promise that the incident is retried automatically. The orchestrator now
   leaves a genuinely rewound conflict at the non-terminal `EXECUTION_FAILED`

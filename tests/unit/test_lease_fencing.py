@@ -820,3 +820,14 @@ def test_evidence_does_not_claim_terminalization_accepts_mutation_requested():
     )
     text = evidence.read_text(encoding="utf-8")
     assert "Terminalization additionally accepts `MUTATION_REQUESTED`" not in text
+
+
+def test_a_rewound_conflict_gives_the_lease_back_so_the_retry_is_possible():
+    """Declaring a retry retryable while squatting on the lease is not a retry."""
+    source = inspect.getsource(__import__("scf.app.executor", fromlist=["execute"]).execute)
+    conflict = source[source.index("if conflict:"):source.index("action.state =")]
+    assert "if rewind == ADVANCED:" in conflict
+    assert "store.release" in conflict
+    # And only when the rewind succeeded: a still-attempted execution must keep
+    # its lease rather than invite the second attempt we refuse elsewhere.
+    assert conflict.index("if rewind == ADVANCED:") < conflict.index("store.release")

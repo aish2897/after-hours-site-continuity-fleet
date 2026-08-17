@@ -666,6 +666,16 @@ async def execute(
             action_id=action_id,
             last_conflict_at=utc_now(),
         )
+        if rewind == ADVANCED:
+            # Nothing was applied and this worker is not continuing, so holding
+            # the lease would make the retry it just declared possible depend on
+            # waiting two minutes for expiry. Released only when the rewind
+            # succeeded: if it did not, the execution stays marked as attempted
+            # and giving the lease away would invite exactly the second attempt
+            # we refuse elsewhere.
+            await run_in_threadpool(
+                store.release, execution_id, owner=owner, lease_epoch=epoch
+            )
         log_event(
             "execution_resource_version_conflict",
             severity="WARNING",
