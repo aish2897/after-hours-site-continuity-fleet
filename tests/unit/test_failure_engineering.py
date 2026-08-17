@@ -986,3 +986,72 @@ def test_the_documented_taxonomy_count_matches_the_code():
         for word, value in (("Thirteen", 13), ("Fourteen", 14), ("Fifteen", 15)):
             if f"{word} categories" in text:
                 assert value == actual, f"{path.name} claims {word}, code has {actual}"
+
+
+# --- Codex Gate E audit, round 4 ---------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "body,healthy",
+    [
+        # The trap: the first key agrees, a later one contradicts it.
+        ('{"ok": true, "state": "failed"}', False),
+        ('{"status": "ok", "healthy": false}', False),
+        ('{"healthy": true, "status": "unhealthy"}', False),
+        # Agreement in both directions.
+        ('{"healthy": true, "status": "ok"}', True),
+        ('{"healthy": false, "status": "unhealthy"}', False),
+        # A single key still decides when it is the only one.
+        ('{"healthy": true}', True),
+        ('{"ok": false}', False),
+    ],
+)
+def test_every_health_key_must_agree(body, healthy):
+    """A body that contradicts itself gets the pessimistic reading."""
+    from scf.tools.cloud_run_evidence import body_is_healthy
+
+    assert body_is_healthy(body) is healthy
+
+
+def test_the_predicate_reads_all_health_keys_not_the_first():
+    from scf.tools import cloud_run_evidence
+
+    source = inspect.getsource(cloud_run_evidence.body_is_healthy)
+    assert "verdicts" in source
+    assert "return all(verdicts)" in source
+
+
+def test_the_readme_python_floor_matches_the_package_metadata():
+    """Telling a judge on 3.11 that it cannot run is a reproducibility defect."""
+    import re
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[2]
+    metadata = (root / "pyproject.toml").read_text(encoding="utf-8")
+    floor = re.search(r'requires-python\s*=\s*">=(\d+\.\d+)"', metadata)
+    assert floor, "pyproject must declare requires-python"
+
+    readme = (root / "README.md").read_text(encoding="utf-8")
+    claimed = re.search(r"Requires \*\*Python (\d+\.\d+)\+\*\*", readme)
+    assert claimed, "README must state a Python floor"
+    assert claimed.group(1) == floor.group(1), (
+        f"README says {claimed.group(1)}+, pyproject says {floor.group(1)}+"
+    )
+
+
+def test_the_docs_do_not_claim_an_llm_authored_proposal():
+    """The remediation proposal is deterministic today; the docs must say so."""
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[2]
+    for name in ("README.md", "ARCHITECTURE.md", "AGENT_CONTRACTS.md"):
+        text = (root / name).read_text(encoding="utf-8")
+        assert "deterministic" in text.lower(), name
+    readme = " ".join((root / "README.md").read_text(encoding="utf-8").lower().split())
+    assert "the model does not choose the action" in readme
+    # And the investigator really is deterministic, so the claim stays true.
+    from scf.tools import cloud_run_evidence
+
+    source = inspect.getsource(cloud_run_evidence.propose_remediation)
+    for llm in ("LlmAgent", "generate_content", "route_incident", "runner"):
+        assert llm not in source

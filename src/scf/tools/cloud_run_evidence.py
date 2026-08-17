@@ -138,17 +138,26 @@ def body_is_healthy(body: str) -> bool:
         payload = None
 
     if isinstance(payload, dict):
+        verdicts = []
         for key in _HEALTH_KEYS:
             if key not in payload:
                 continue
             value = payload[key]
             if isinstance(value, bool):
-                return value
-            if isinstance(value, str):
-                return _text_is_healthy(value.strip().lower())
-            # A non-boolean, non-string health value is not an assertion of
-            # health, and guessing at it would be exactly the wrong instinct.
-            return False
+                verdicts.append(value)
+            elif isinstance(value, str):
+                verdicts.append(_text_is_healthy(value.strip().lower()))
+            else:
+                # A non-boolean, non-string health value asserts nothing, and
+                # guessing at it would be exactly the wrong instinct.
+                verdicts.append(False)
+        if verdicts:
+            # EVERY recognised health key must agree. Returning on the first
+            # one read `{"ok": true, "state": "failed"}` as healthy, because
+            # `ok` was checked before `state` and the failure was never looked
+            # at. When a body contradicts itself, the pessimistic reading is
+            # the only safe one.
+            return all(verdicts)
 
     return _text_is_healthy(text)
 

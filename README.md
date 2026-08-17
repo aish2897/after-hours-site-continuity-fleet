@@ -10,10 +10,23 @@ Built for the All Things Agentic Hackathon, Fortified Enterprise Fleet track.
 
 > **LLM proposes. Deterministic code decides. Scoped identity executes.**
 
-Gemini interprets messy human reports, routes to specialists, and proposes a
-remediation from a closed enum. It never authorizes anything. Authorization is
-a pure, table-driven function over trusted evidence. Execution happens under a
-Google service account whose IAM role is scoped to a single Cloud Run service.
+Gemini interprets messy human reports and decides which specialists should
+investigate, with a stated reason for every call and every decline. It never
+authorizes anything.
+
+**What the LLM does today, precisely.** Routing is the LLM's only load-bearing
+output. The remediation proposal is currently produced *deterministically* by
+the Systems Investigator from trusted evidence — the model does not choose the
+action. The `Proposal` contract, the closed `ActionType` enum and the
+`propose_remediation` boundary all exist so that an LLM-authored proposal can
+be dropped in without widening anyone's authority, and the security properties
+are written for that case: a hallucinated privileged action is refused by the
+deterministic gate, on the record ([`gate-e`](docs/evidence/gate-e-failure-engineering.md)).
+Until that lands, "LLM proposes" describes the architecture, not the runtime.
+
+Authorization is a pure, table-driven function over trusted evidence. Execution
+happens under a Google service account whose IAM role is scoped to a single
+Cloud Run service.
 
 ## Integration status
 
@@ -151,8 +164,8 @@ by repeated delivery against Firestore-backed deterministic idempotency.
 
 ## Local run
 
-Requires **Python 3.13+**. `StrEnum` means 3.10 will not work, and on some
-machines `python` on PATH is older than `py -3.13`.
+Requires **Python 3.11+** (`StrEnum` means 3.10 will not work). Developed and
+tested on 3.13; on some machines `python` on PATH is older than `py -3.13`.
 
 ```powershell
 git clone https://github.com/aish2897/after-hours-site-continuity-fleet.git

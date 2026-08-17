@@ -28,9 +28,13 @@ access. Overriding a policy decision.
 **Contract.** Every specialist appears in the routing decision as either
 required with a reason, or declined with a reason. Silent omission is invalid.
 
-## Systems Investigator — LLM-backed
+## Systems Investigator
 
 **Purpose.** Service, revision, and application health.
+
+**Status.** Evidence gathering and the `Proposal` are deterministic today; the
+contract below is written so an LLM-authored proposal can be substituted
+without changing any authority. See README for what the LLM does at runtime.
 
 **Allowed.** `read_service_health`, `read_revision_history`. May emit a
 `Proposal`.

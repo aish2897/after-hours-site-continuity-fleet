@@ -24,6 +24,13 @@ vendor.
 - Summarize evidence.
 - Propose a remediation from a closed enum.
 
+**Implemented today: routing only.** The remediation proposal is produced
+deterministically by the Systems Investigator from trusted evidence; the model
+does not choose the action. The closed enum, the `Proposal` contract and the
+refusal path are built and proven for an LLM-authored proposal — see Gate E,
+where a hallucinated `EXPORT_CREDENTIALS` is refused by the deterministic gate
+— but the runtime does not yet exercise that path.
+
 ### Deterministic code must
 
 - Classify risk and authorize actions.
@@ -65,7 +72,7 @@ recorded decision, not an omission.
 | Component | Type | Runs as |
 |---|---|---|
 | Orchestrator | Cloud Run, LLM-backed | `sa-orchestrator` |
-| Systems Investigator | Cloud Run, LLM-backed, stateless | `sa-agent-systems` |
+| Systems Investigator | Cloud Run, stateless; evidence and proposal deterministic today | `sa-agent-systems` |
 | Policy Gate | in-process pure function | caller's identity |
 | Remediation Executor | Cloud Run, no LLM | `sa-executor` |
 | Verifier | Cloud Run, no LLM | `sa-verifier` |
