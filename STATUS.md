@@ -1,9 +1,12 @@
 # STATUS
 
-CURRENT PHASE: Gate D.3 complete (7 hostile-review rounds; last 4 returned no Critical, no High)
+CURRENT PHASE: Gate E complete — AUG 21 FAILURE ENGINEERING: VERIFIED
 
 WED AUG 19 — FULL AUTONOMOUS SLICE: VERIFIED
 (achieved 2026-08-15, ahead of the wall-plan date)
+
+AUG 21 — FAILURE ENGINEERING: VERIFIED
+(achieved 2026-08-17, ahead of the wall-plan date)
 
 ## VERIFIED
 
@@ -70,12 +73,30 @@ Real execution proof exists in `docs/evidence/`.
   nothing. If the rewind is itself fenced, the execution stays marked as
   attempted and the incident escalates.**
 
+- **Fourteen live fault scenarios, every one with a real broken deployment or a
+  real Google error: malformed model output, hallucinated privileged action,
+  investigator timeout and 503, worker budget exhaustion, insufficient
+  evidence, real 409 conflict, candidate no longer healthy, verifier 503,
+  executor 503, caller losing a surviving executor, malformed authenticated
+  worker payload — no scenario produced more than one infrastructure change**
+- **Closed failure taxonomy: 13 categories, one table fixing resting state,
+  reconcilability, retry eligibility, audit event and manager summary**
+- **Deterministic escalation package: plain-language impact, what automation
+  did and did not change, current service state, recommended action — no model
+  text, no credentials, no API detail**
+- **Every retry budget is zero and declared as a constant**
+- **Bounded workers: 12 tool calls and a 30s deadline, per-service call
+  timeouts, budget exhaustion returns a truthful terminal contract**
+- **Fault injection that is disabled by default and structurally unreachable
+  from duty-manager input**
+
 ## IN PROGRESS
 
-Nothing. Gate D.3 is closed.
+Nothing. Gate E is closed.
 
 ## NOT STARTED
 
+- Automatic sweep of reconcilable incidents (`/reconcile` is operator-triggered)
 - Human approval and resume
 - Crash-resumable workflow
 - Model Armor (Melbourne `australia-southeast2`)
@@ -104,6 +125,14 @@ Nothing. Gate D.3 is closed.
 - The authorization fingerprint stops an equivalent re-issued decision, not a
   materially different forged one. Full control-plane compromise is not covered.
 - Candidate health is a point-in-time precondition, not a future guarantee.
+- Fault-injection code ships in the repository. Disabled by default,
+  structurally unreachable from user input, refuses to start on an unknown
+  mode — but present, and removable before submission.
+- Cloud Run drains in-flight requests on redeploy, so a redeploy does not kill a
+  running execution. The interruption proof is a caller losing the call while
+  the worker survives, not a process kill mid-write.
+- The escalation package is a persisted artifact, not a delivery mechanism. No
+  email, SMS or ticket is raised.
 - Control-plane closure is re-checked immediately before the mutation, but
   Firestore and the Cloud Run Admin API cannot be committed together, so that
   window is narrowed rather than eliminated — the same limitation as the
@@ -113,9 +142,9 @@ Nothing. Gate D.3 is closed.
 
 ## NEXT HARD GATE
 
-Failure engineering. Not yet authorized. Candidates in priority order: human approval with
-resumable state, Model Armor inspection of untrusted content before agent use,
-and the remaining fleet investigators.
+Durability and human-in-the-loop approval (Gate F / Aug 22). Not yet authorized.
+Then Model Armor inspection of untrusted content before agent use, and the
+remaining fleet investigators.
 
 ## FROZEN ARCHITECTURE RULES
 

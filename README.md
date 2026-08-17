@@ -66,6 +66,15 @@ capability beyond the state recorded here.
 | Candidate re-probed immediately before mutating | **`VERIFIED`** | [`gate-d3`](docs/evidence/gate-d3-lease-fencing-cas.md) |
 | Audit truncation detected against incident tail metadata | **`VERIFIED`** | [`gate-d3`](docs/evidence/gate-d3-lease-fencing-cas.md) |
 | One authorization fingerprint → one execution identity | **`VERIFIED`** | [`gate-d3`](docs/evidence/gate-d3-lease-fencing-cas.md) |
+| Malformed model output rejected at the parser | **`VERIFIED`** | [`gate-e`](docs/evidence/gate-e-failure-engineering.md) |
+| Hallucinated privileged action deterministically denied | **`VERIFIED`** | [`gate-e`](docs/evidence/gate-e-failure-engineering.md) |
+| Real worker timeout and 503 → escalation, zero mutation | **`VERIFIED`** | [`gate-e`](docs/evidence/gate-e-failure-engineering.md) |
+| Bounded worker budget (looping worker terminated) | **`VERIFIED`** | [`gate-e`](docs/evidence/gate-e-failure-engineering.md) |
+| Doing nothing when evidence is insufficient | **`VERIFIED`** | [`gate-e`](docs/evidence/gate-e-failure-engineering.md) |
+| Authenticated-but-malformed worker payload rejected | **`VERIFIED`** | [`gate-e`](docs/evidence/gate-e-failure-engineering.md) |
+| Caller loses a surviving executor → reconciled, one effect | **`VERIFIED`** | [`gate-e`](docs/evidence/gate-e-failure-engineering.md) |
+| Deterministic failure taxonomy + escalation package | **`VERIFIED`** | [`gate-e`](docs/evidence/gate-e-failure-engineering.md) |
+| No blind retry (every retry budget is zero) | **`VERIFIED`** | [`gate-e`](docs/evidence/gate-e-failure-engineering.md) |
 | Closed incident cannot be re-executed | **`VERIFIED`** | [`gate-d3`](docs/evidence/gate-d3-lease-fencing-cas.md) |
 | Reconciliation after an unreachable executor | **`VERIFIED`** | [`gate-d3`](docs/evidence/gate-d3-lease-fencing-cas.md) |
 | An attempted execution never mutates twice | **`VERIFIED`** | [`gate-d3`](docs/evidence/gate-d3-lease-fencing-cas.md) |
