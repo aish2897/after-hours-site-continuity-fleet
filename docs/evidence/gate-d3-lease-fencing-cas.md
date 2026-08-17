@@ -460,7 +460,7 @@ nothing was argued away.
 
 | # | Finding | Fix |
 |---|---|---|
-| High 1 | A lease that lapsed *while the Cloud Run call was in flight* left a successful mutation unrecorded. Terminalization then refused (`execution_not_mutated`) and the incident escalated — a recovered service inside a failed incident. | Losing a lease to nobody is not a fence: the worker re-acquires and records the outcome. Terminalization additionally accepts `MUTATION_REQUESTED`, because what gates it is the re-observed infrastructure, not our bookkeeping. And only a genuine `infrastructure_does_not_match_authorization` closes an incident; a bookkeeping refusal leaves it reconcilable. |
+| High 1 | A lease that lapsed *while the Cloud Run call was in flight* left a successful mutation unrecorded. Terminalization then refused (`execution_not_mutated`) and the incident escalated — a recovered service inside a failed incident. | Losing a lease to nobody is not a fence: the worker re-acquires and records the outcome. And only a genuine `infrastructure_does_not_match_authorization` closes an incident; a bookkeeping refusal leaves it reconcilable. *(This row originally also widened terminalization to accept `MUTATION_REQUESTED`. Round 2 reversed that — see below — because it is written before the API call and would allow false attribution. The re-acquisition above is what actually fixes this finding.)* |
 | High 2 | A decision belonging to an already-escalated incident could still be executed later, if its preconditions happened to hold again. Control-plane closure was not enforced at the mutating boundary. | The executor now reads the incident and refuses any decision whose incident is `RESOLVED` or `ESCALATED` (`incident_closed:<status>`), before binding, ownership, or any infrastructure read. |
 | Medium 1 | The docs claimed a stale worker "cannot record having acted". It still wrote a receipt. | A genuinely fenced worker now writes no receipt, and the claim was narrowed to exactly what the code enforces, in five documents. |
 | Medium 2 | The older D.3A evidence said Firestore fencing "closes" the stale-worker case. It does not. | Corrected in place, with a pointer to the property actually defended. |
@@ -569,9 +569,22 @@ infrastructure change.
 
 One distinction is preserved deliberately. A **409 ABORTED is proof that
 nothing was applied**, so a conflict winds the record back to
-`PRECONDITION_CHECKED` — which is not an attempted state — and a legitimate
-retry can still proceed. Any other non-2xx might have applied something, so it
-stays conservative and fails the execution.
+`PRECONDITION_CHECKED` — which is not an attempted state. Any other non-2xx
+might have applied something, so it stays conservative and fails the execution.
+
+Two qualifications, both added after round 4 pointed out the claim was wider
+than the code:
+
+- The rewind is itself ownership-bound. If the lease was taken while the
+  conflicting call was in flight it is refused, the record stays at
+  `MUTATION_REQUESTED`, and the execution remains marked as attempted. That
+  outcome is now reported as `conflict_rewind` and `retryable: false` rather
+  than assumed.
+- "Retry is still possible" is a statement about the *execution record*, not a
+  promise that the incident is retried automatically. The orchestrator now
+  leaves a genuinely rewound conflict at the non-terminal `EXECUTION_FAILED`
+  so `/reconcile` can pick it up, instead of escalating on a call that changed
+  nothing. A conflict whose rewind failed still escalates.
 
 The resulting rule, stated exactly:
 

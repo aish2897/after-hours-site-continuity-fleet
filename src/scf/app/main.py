@@ -186,6 +186,21 @@ async def create_incident(
     )
 
 
+def _is_retryable_conflict(receipt: dict[str, Any]) -> bool:
+    """A Cloud Run precondition conflict that provably applied nothing.
+
+    Both halves are required. `CONCURRENT_MODIFICATION` means Google refused
+    the write with 409 ABORTED, and `retryable` means the executor also
+    succeeded in winding its own record back — if its lease was taken while the
+    conflicting call was in flight it could not, and the execution stays marked
+    as attempted, which must not be treated as a clean retry.
+    """
+    return (
+        receipt.get("reason") == "CONCURRENT_MODIFICATION"
+        and receipt.get("retryable") is True
+    )
+
+
 class DownstreamFailure(Exception):
     """A service-to-service call failed. The incident must not hang."""
 
@@ -446,9 +461,19 @@ async def _run_remediation(
         await run_in_threadpool(
             repo.transition, incident_id, IncidentStatus.EXECUTION_FAILED, trace_id=trace_id
         )
+        if _is_retryable_conflict(receipt):
+            # Google refused the write on the precondition and wound the record
+            # back, so nothing was applied and the execution is not marked as
+            # attempted. That is a retry case, not a failure: the incident stays
+            # at the non-terminal EXECUTION_FAILED so reconciliation can pick it
+            # up, rather than being closed on a conflict that changed nothing.
+            outcome["awaiting_reconciliation"] = True
+            outcome["final_status"] = IncidentStatus.EXECUTION_FAILED.value
+            return outcome
         await run_in_threadpool(
             repo.transition, incident_id, IncidentStatus.ESCALATED, trace_id=trace_id
         )
+        outcome["final_status"] = IncidentStatus.ESCALATED.value
         return outcome
 
     await run_in_threadpool(
@@ -688,6 +713,18 @@ async def reconcile_incident(
             # reach the executor to learn the outcome. Reconciliation does not
             # re-open execution — it establishes what actually happened.
             if not (receipt.get("mutated") or receipt.get("reconciled")):
+                if _is_retryable_conflict(receipt):
+                    # Same rule on the recovery path: a conflict that applied
+                    # nothing leaves the incident reconcilable rather than
+                    # closing it.
+                    outcome["awaiting_reconciliation"] = True
+                    outcome["final_status"] = IncidentStatus.EXECUTION_FAILED.value
+                    final = await run_in_threadpool(repo.get, incident_id)
+                    outcome.update(
+                        {"incident_id": incident_id, "status": final["status"],
+                         "reconciled": False}
+                    )
+                    return outcome
                 await run_in_threadpool(
                     repo.transition,
                     incident_id,

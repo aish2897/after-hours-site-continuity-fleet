@@ -65,7 +65,10 @@ Real execution proof exists in `docs/evidence/`.
   than falsely closed; reconciliation completes it with exactly one effect**
 - **An execution that has issued its mutation — recorded or not — refuses to
   issue another, so an operator's deliberate rollback is never overwritten. A
-  409 ABORTED is proof nothing was applied and preserves a legitimate retry.**
+  409 ABORTED is proof nothing was applied, so the record is wound back and the
+  incident stays reconcilable rather than being closed on a call that changed
+  nothing. If the rewind is itself fenced, the execution stays marked as
+  attempted and the incident escalates.**
 
 ## IN PROGRESS
 

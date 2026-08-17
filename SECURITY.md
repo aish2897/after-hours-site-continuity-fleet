@@ -144,8 +144,12 @@ Stated plainly rather than implied away.
     "Issued" deliberately includes a mutation Google accepted whose success
     write was fenced — that record never advances past `MUTATION_REQUESTED`, so
     that state must count as attempted. The one case treated as definitely not
-    applied is a 409 ABORTED, which is proof the write was refused, and which
-    therefore still permits a legitimate retry.
+    applied is a 409 ABORTED, which is proof the write was refused: the record
+    is wound back to `PRECONDITION_CHECKED` and the incident is left
+    reconcilable rather than closed. That rewind is ownership-bound, so if the
+    lease was taken while the conflicting call was in flight it is refused, the
+    execution stays marked as attempted, and the incident escalates — reported
+    explicitly rather than assumed.
 11. **Candidate freshness is point-in-time.** The rollback target is re-probed
    through its own tag URL immediately before mutating, and a stale or
    unhealthy candidate produces `TARGET_NO_LONGER_HEALTHY` and no mutation.

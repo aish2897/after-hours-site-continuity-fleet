@@ -659,7 +659,7 @@ async def execute(
         # leaving it at MUTATION_REQUESTED would mark this execution as having
         # possibly acted and permanently bar a legitimate retry, for a call we
         # know had no effect.
-        await run_in_threadpool(
+        rewind, _ = await run_in_threadpool(
             _advance,
             ExecutionState.PRECONDITION_CHECKED,
             expect_states=(ExecutionState.MUTATION_REQUESTED,),
@@ -673,11 +673,17 @@ async def execute(
             incident_id=request.incident_id,
             execution_id=execution_id,
             resource_version_sent=base["resource_version_sent"],
+            rewind=rewind,
         )
         return _refuse(
             "CONCURRENT_MODIFICATION",
             conflict=True,
             http_status=mutation.get("http_status"),
+            # Reported rather than assumed: if our lease was taken while the
+            # conflicting call was in flight, the rewind is refused and the
+            # record stays at MUTATION_REQUESTED — conservative, and visible.
+            conflict_rewind=rewind,
+            retryable=rewind == ADVANCED,
             result=mutation,
             **base,
         )

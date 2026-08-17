@@ -771,3 +771,52 @@ def test_a_non_conflict_failure_stays_conservative():
     """A 500 might have applied something; only 409 proves it did not."""
     source = inspect.getsource(__import__("scf.app.executor", fromlist=["execute"]).execute)
     assert "ExecutionState.MUTATED if accepted else ExecutionState.FAILED" in source
+
+
+# --- Codex review round 4 -----------------------------------------------------
+
+
+def test_the_conflict_rewind_result_is_reported_not_assumed():
+    """If our lease was taken mid-conflict the rewind fails; that must show."""
+    source = inspect.getsource(__import__("scf.app.executor", fromlist=["execute"]).execute)
+    conflict = source[source.index("if conflict:"):source.index("action.state =")]
+    assert "rewind, _ = await run_in_threadpool" in conflict
+    assert "conflict_rewind=rewind" in conflict
+    assert "retryable=rewind == ADVANCED" in conflict
+
+
+def test_a_retryable_conflict_needs_both_the_refusal_and_the_rewind():
+    from scf.app.main import _is_retryable_conflict
+
+    assert _is_retryable_conflict({"reason": "CONCURRENT_MODIFICATION", "retryable": True})
+    # A conflict whose rewind was fenced is NOT a clean retry.
+    assert not _is_retryable_conflict(
+        {"reason": "CONCURRENT_MODIFICATION", "retryable": False}
+    )
+    assert not _is_retryable_conflict({"reason": "CONCURRENT_MODIFICATION"})
+    assert not _is_retryable_conflict({"reason": "STALE_EVIDENCE", "retryable": True})
+    assert not _is_retryable_conflict({})
+
+
+def test_a_conflict_that_changed_nothing_does_not_close_the_incident():
+    from scf.app import main
+    from scf.domain.enums import IncidentStatus
+    from scf.domain.state_machine import TERMINAL_STATES
+
+    source = inspect.getsource(main._run_remediation)
+    guard_at = source.index("_is_retryable_conflict(receipt)")
+    escalate_at = source.index("IncidentStatus.ESCALATED", guard_at)
+    assert guard_at < escalate_at, "the conflict case must return before escalating"
+    assert IncidentStatus.EXECUTION_FAILED not in TERMINAL_STATES
+    # The recovery path applies the same rule.
+    assert "_is_retryable_conflict(receipt)" in inspect.getsource(main.reconcile_incident)
+
+
+def test_evidence_does_not_claim_terminalization_accepts_mutation_requested():
+    from pathlib import Path
+
+    evidence = Path(__file__).resolve().parents[2] / (
+        "docs/evidence/gate-d3-lease-fencing-cas.md"
+    )
+    text = evidence.read_text(encoding="utf-8")
+    assert "Terminalization additionally accepts `MUTATION_REQUESTED`" not in text
