@@ -9,6 +9,7 @@ what may be done about it.
 from __future__ import annotations
 
 import re
+import time
 from collections.abc import Callable
 from typing import Any
 
@@ -138,6 +139,9 @@ def _ev(key: str, value: Any, supports: str) -> Evidence:
     )
 
 
+#: A failing probe is confirmed once before it counts as evidence.
+CONFIRM_UNHEALTHY_AFTER_SECONDS = 3.0
+
 KNOWN_GOOD_TAG = "known-good"
 
 
@@ -183,6 +187,17 @@ def gather_evidence(
     # unhealthy is unhealthy; reading only the status code would let it report
     # its own failure and be ignored.
     live_healthy = status_code == 200 and body_is_healthy(body)
+
+    if not live_healthy:
+        # Confirm before concluding. A single dropped connection or cold-start
+        # blip would otherwise be enough evidence to warrant changing
+        # infrastructure, and the cost of being wrong here is an unnecessary
+        # rollback of a service that was fine. This is a read-only second
+        # look, not a retry of any action.
+        time.sleep(CONFIRM_UNHEALTHY_AFTER_SECONDS)
+        spend("confirm_live_service")
+        status_code, body = probe_health(url)
+        live_healthy = status_code == 200 and body_is_healthy(body)
     approved = bool(candidate_revision) and candidate_revision != active_revision
 
     spend("probe_candidate_revision")

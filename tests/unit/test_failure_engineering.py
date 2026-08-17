@@ -881,3 +881,40 @@ def test_every_probe_is_bounded_well_under_the_deadline():
     assert "timeout=20.0" not in source
     # Worst case is the deadline plus at most one call, and one call is small.
     assert WORK_DEADLINE_SECONDS >= 30
+
+
+# --- self-audit, round 3 ------------------------------------------------------
+
+
+def test_every_receipt_read_that_decides_anything_is_typed():
+    from scf.app import main
+
+    source = inspect.getsource(main._execution_already_landed)
+    assert "ExecutionReceipt.model_validate" in source
+    assert 'receipt.get("duplicate")' not in source
+    # An unreadable receipt proves nothing landed.
+    assert main._execution_already_landed({"duplicate": "yes", "state": "MUTATED"}) is False
+
+
+def test_a_single_probe_blip_does_not_warrant_changing_infrastructure():
+    """The cost of being wrong is rolling back a service that was fine."""
+    from scf.tools import cloud_run_evidence
+
+    source = inspect.getsource(cloud_run_evidence.gather_evidence)
+    assert "confirm_live_service" in source
+    assert "CONFIRM_UNHEALTHY_AFTER_SECONDS" in source
+    # The confirmation only runs when the first look failed, and it is a read.
+    assert source.index("live_healthy = status_code == 200") < source.index(
+        "if not live_healthy:"
+    )
+    assert cloud_run_evidence.CONFIRM_UNHEALTHY_AFTER_SECONDS > 0
+
+
+def test_the_confirmation_is_a_read_not_a_retry_of_an_action():
+    from scf.tools import cloud_run_evidence
+
+    source = inspect.getsource(cloud_run_evidence.gather_evidence)
+    confirm = source[source.index("if not live_healthy:"):]
+    assert "probe_health" in confirm
+    for mutating in ("flip_traffic", "replaceService", "httpx.put", "httpx.patch"):
+        assert mutating not in confirm

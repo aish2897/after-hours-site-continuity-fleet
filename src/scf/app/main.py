@@ -1064,9 +1064,14 @@ def _execution_already_landed(receipt: dict[str, Any]) -> bool:
     can make: it tells a duty manager nothing was done while the shop is back
     up, and leaves no route to correct it.
     """
-    if not receipt.get("duplicate"):
+    try:
+        reported = ExecutionReceipt.model_validate(receipt)
+    except ValidationError:
+        # An unreadable receipt proves nothing landed.
         return False
-    return str(receipt.get("state") or "") in LANDED_EXECUTION_STATES
+    if not reported.duplicate:
+        return False
+    return str(reported.state or "") in LANDED_EXECUTION_STATES
 
 
 #: Non-terminal states meaning "a mutation may have happened and we could not
