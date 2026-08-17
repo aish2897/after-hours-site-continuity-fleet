@@ -102,12 +102,21 @@ Recorded so they are not mistaken for platform problems:
 ## Data residency statement
 
 Authoritative incident state, audit records, and privileged execution remain on
-Australian Google Cloud infrastructure (Sydney `australia-southeast1`), with
-Model Armor inspection in Melbourne `australia-southeast2`.
+Australian Google Cloud infrastructure (Sydney `australia-southeast1`).
 
 Gemini 3.7 Flash inference is performed through Vertex AI's `global` endpoint
 because no Australian inference endpoint is published for this model.
 
 **Complete Australian data residency is therefore not claimed.** The
-competition environment uses synthetic data only, and an explicit
-classification and security boundary governs what may be sent to the model.
+competition environment uses synthetic data only.
+
+> **Corrected after Gate E.** This section originally said Model Armor
+> inspection runs in Melbourne and that "an explicit classification and security
+> boundary governs what may be sent to the model". Neither is true, and neither
+> was true when this was written. **Model Armor is PLANNED and NOT INTEGRATED,
+> and there is no classification or inspection step at all**: the duty
+> manager's report text is passed to the routing agent, and therefore to the
+> `global` endpoint, uninspected. The boundary that does hold is narrower —
+> untrusted text is recorded as `UNTRUSTED_INPUT` and can never satisfy a
+> policy condition, which protects the *authorization* path and nothing more.
+> See `ARCHITECTURE.md` and `README.md`, which are authoritative.

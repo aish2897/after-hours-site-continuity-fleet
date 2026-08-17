@@ -101,23 +101,45 @@ _UNHEALTHY_PHRASES = ("not healthy", "not ok", "not ready", "not serving")
 _HEALTH_KEYS = ("healthy", "ok", "ready", "serving", "status", "state")
 
 
-def _text_is_negative(text: str) -> bool:
-    """Does the raw body contain an explicit failure marker anywhere?"""
-    if any(phrase in text for phrase in _UNHEALTHY_PHRASES):
-        return True
-    return bool(set(re.findall(r"[a-z]+", text)) & _UNHEALTHY_WORDS)
+#: Marker for a health key that appeared twice with different values. JSON
+#: parsing silently keeps the last one, so the contradiction has to be recorded
+#: while the pairs are still visible.
+_CONFLICT_KEY = "__scf_conflicting_health_keys__"
 
 
-def _collect_health_verdicts(payload: Any) -> list[bool]:
+def _object_pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    """Build a dict while remembering keys that disagreed with themselves."""
+    result: dict[str, Any] = {}
+    conflicts: list[str] = []
+    for key, value in pairs:
+        if key in result and result[key] != value:
+            conflicts.append(key)
+        result[key] = value
+    if conflicts:
+        result[_CONFLICT_KEY] = conflicts
+    return result
+
+
+def _collect_health_verdicts(payload: Any, depth: int = 0) -> list[bool]:
     """Every recognised health key in the structure, at any depth.
 
     A health endpoint that reports per-dependency detail keeps its verdicts in
     nested objects. Looking only at the top level means a body can announce
     `ok: true` while a nested check says it has failed.
     """
+    if depth > MAX_HEALTH_DEPTH:
+        # Too deep to read is not an assertion of health.
+        return [False]
+
     verdicts: list[bool] = []
     if isinstance(payload, dict):
+        # A health key that contradicted itself is a contradiction, whichever
+        # value the parser happened to keep.
+        if any(key in _HEALTH_KEYS for key in payload.get(_CONFLICT_KEY, ())):
+            verdicts.append(False)
         for key, value in payload.items():
+            if key == _CONFLICT_KEY:
+                continue
             if key in _HEALTH_KEYS:
                 if isinstance(value, bool):
                     verdicts.append(value)
@@ -127,10 +149,10 @@ def _collect_health_verdicts(payload: Any) -> list[bool]:
                     # A non-boolean, non-string health value asserts nothing,
                     # and guessing at it would be exactly the wrong instinct.
                     verdicts.append(False)
-            verdicts.extend(_collect_health_verdicts(value))
+            verdicts.extend(_collect_health_verdicts(value, depth + 1))
     elif isinstance(payload, list):
         for item in payload:
-            verdicts.extend(_collect_health_verdicts(item))
+            verdicts.extend(_collect_health_verdicts(item, depth + 1))
     return verdicts
 
 
@@ -164,9 +186,15 @@ def body_is_healthy(body: str) -> bool:
     text = body.strip().lower()
     if not text:
         return False
+    if len(text) > MAX_HEALTH_BODY_BYTES:
+        # A body this size is not a health answer. Reading it is a denial-of
+        # -service surface, and refusing it fails closed.
+        return False
 
     try:
-        payload = json.loads(text)
+        payload = json.loads(text, object_pairs_hook=_object_pairs)
+    except RecursionError:
+        payload = None
     except ValueError:
         payload = None
 
@@ -178,10 +206,13 @@ def body_is_healthy(body: str) -> bool:
         # "failed"}}}` healthy. A body that contradicts itself anywhere gets
         # the pessimistic reading.
         #
-        # The raw text is also scanned as a veto. That catches what structure
-        # alone cannot — duplicate keys, where JSON parsing silently keeps the
-        # last one and the contradiction disappears before we ever see it.
-        return all(verdicts) and not _text_is_negative(text)
+        # Duplicate keys are caught precisely, while the pairs are still
+        # visible, rather than by scanning the raw text for failure words. That
+        # scan looked safer than it was: a healthy body carrying metadata like
+        # `"failure_count": 0` would have been read as unhealthy, which fails
+        # closed in the worst place — it would block a genuine recovery from
+        # ever being verified.
+        return all(verdicts)
 
     return _text_is_healthy(text)
 
@@ -209,6 +240,14 @@ def _ev(key: str, value: Any, supports: str) -> Evidence:
         trust_level=TrustLevel.TRUSTED_TOOL,
     )
 
+
+#: Bounds on reading a health body. A probe response is untrusted input from a
+#: service that may be misbehaving in exactly the way we are trying to detect,
+#: so it must not be able to exhaust the reader: an unbounded walk over deeply
+#: nested JSON raises RecursionError, which would crash the investigator or the
+#: verifier instead of returning "unhealthy".
+MAX_HEALTH_BODY_BYTES = 64 * 1024
+MAX_HEALTH_DEPTH = 20
 
 #: A failing probe is confirmed once before it counts as evidence.
 CONFIRM_UNHEALTHY_AFTER_SECONDS = 3.0

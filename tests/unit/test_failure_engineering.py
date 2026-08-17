@@ -1070,8 +1070,12 @@ def test_the_docs_do_not_claim_an_llm_authored_proposal():
         ('{"healthy": true, "checks": {"db": {"state": "ok"}}}', True),
         # Duplicate keys: JSON keeps the last, so the raw text is the veto.
         ('{"healthy": false, "healthy": true}', False),
-        # A negative word anywhere vetoes a structurally healthy body.
-        ('{"healthy": true, "note": "database unavailable"}', False),
+        # A declared health key is trusted over free text elsewhere: a blanket
+        # text veto read `{"healthy": true, "failure_count": 0}` as unhealthy,
+        # which would block a genuine recovery from ever being verified.
+        ('{"healthy": true, "failure_count": 0}', True),
+        ('{"healthy": true, "last_failure": null}', True),
+        ('{"healthy": true, "healthy": false}', False),
     ],
 )
 def test_a_nested_or_duplicated_contradiction_fails_closed(body, healthy):
@@ -1122,3 +1126,83 @@ def test_the_readme_does_not_claim_a_boundary_that_does_not_exist():
     readme = " ".join((root / "README.md").read_text(encoding="utf-8").lower().split())
     assert "an explicit classification and security boundary governs" not in readme
     assert "there is no classification or inspection step today" in readme
+
+
+def test_duplicate_health_keys_are_caught_while_the_pairs_are_visible():
+    """JSON keeps the last duplicate; the contradiction must be seen before that."""
+    from scf.tools.cloud_run_evidence import body_is_healthy
+
+    for body in ('{"healthy": false, "healthy": true}',
+                 '{"healthy": true, "healthy": false}',
+                 '{"ok": true, "ok": false}'):
+        assert body_is_healthy(body) is False, body
+    # A duplicate that agrees with itself is not a contradiction.
+    assert body_is_healthy('{"healthy": true, "healthy": true}') is True
+    # A duplicate on an unrelated key says nothing about health.
+    assert body_is_healthy('{"healthy": true, "note": "a", "note": "b"}') is True
+
+
+def test_a_healthy_body_carrying_failure_metadata_is_still_healthy():
+    """A false negative here blocks recovery verification — the worst place for it."""
+    from scf.tools.cloud_run_evidence import body_is_healthy
+
+    for body in ('{"healthy": true, "failure_count": 0}',
+                 '{"healthy": true, "last_failure": null}',
+                 '{"status": "ok", "errors": 0, "degraded_since": null}'):
+        assert body_is_healthy(body) is True, body
+
+
+def test_health_reading_does_not_scan_raw_text_when_json_parses():
+    from scf.tools import cloud_run_evidence
+
+    source = inspect.getsource(cloud_run_evidence.body_is_healthy)
+    assert "_text_is_negative" not in source
+    assert "object_pairs_hook=_object_pairs" in source
+
+
+# --- Codex Gate E audit, round 6 ---------------------------------------------
+
+
+def test_a_hostile_health_body_cannot_exhaust_the_reader():
+    """A probe response is untrusted input from a service that is misbehaving."""
+    from scf.tools.cloud_run_evidence import (
+        MAX_HEALTH_BODY_BYTES,
+        MAX_HEALTH_DEPTH,
+        body_is_healthy,
+    )
+
+    # Deep enough to blow the stack if the walk were unbounded.
+    deep = '{"a":' * 3000 + "1" + "}" * 3000
+    assert body_is_healthy(deep) is False
+
+    # Past the declared depth limit, "too deep to read" is not health.
+    beyond = '{"a":' * (MAX_HEALTH_DEPTH + 5) + '{"healthy": true}' + "}" * (
+        MAX_HEALTH_DEPTH + 5
+    )
+    assert body_is_healthy(beyond) is False
+
+    # Oversized bodies are refused rather than parsed.
+    assert body_is_healthy("x" * (MAX_HEALTH_BODY_BYTES + 1) + " healthy") is False
+
+    # Ordinary nesting still reads correctly.
+    assert body_is_healthy('{"healthy": true, "checks": {"db": {"state": "ok"}}}') is True
+
+
+def test_the_health_reader_declares_its_bounds():
+    from scf.tools import cloud_run_evidence
+
+    assert cloud_run_evidence.MAX_HEALTH_DEPTH > 0
+    assert cloud_run_evidence.MAX_HEALTH_BODY_BYTES > 0
+    source = inspect.getsource(cloud_run_evidence.body_is_healthy)
+    assert "except RecursionError" in source
+
+
+def test_no_evidence_artifact_still_claims_a_classification_boundary():
+    """Superseded evidence gets an in-place correction, not a quiet edit."""
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[2] / "docs" / "evidence"
+    for path in root.glob("*.md"):
+        text = " ".join(path.read_text(encoding="utf-8").lower().split())
+        if "classification and security boundary governs" in text:
+            assert "corrected after gate e" in text, path.name
