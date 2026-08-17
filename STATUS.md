@@ -73,12 +73,15 @@ Real execution proof exists in `docs/evidence/`.
   nothing. If the rewind is itself fenced, the execution stays marked as
   attempted and the incident escalates.**
 
-- **Fourteen live fault scenarios, every one with a real broken deployment or a
-  real Google error: malformed model output, hallucinated privileged action,
-  investigator timeout and 503, worker budget exhaustion, insufficient
-  evidence, real 409 conflict, candidate no longer healthy, verifier 503,
-  executor 503, caller losing a surviving executor, malformed authenticated
-  worker payload — no scenario produced more than one infrastructure change**
+- **Fourteen fault scenarios, run end to end against the deployed fleet. Six
+  are failures produced by Google infrastructure itself: investigator timeout,
+  investigator 503, executor 503, verifier 503, a real 409 ABORTED on the
+  Cloud Run traffic write, and a real candidate probe. The other eight are
+  controlled payloads driven through the real parser, the real policy gate and
+  the real caller: malformed model output (x3), hallucinated privileged
+  action, action outside the closed enum, runaway worker loop, insufficient
+  evidence, and a malformed authenticated worker payload. No scenario produced
+  more than one infrastructure change.**
 - **Closed failure taxonomy: 13 categories, one table fixing resting state,
   reconcilability, retry eligibility, audit event and manager summary**
 - **Deterministic escalation package: plain-language impact, what automation

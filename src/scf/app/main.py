@@ -6,7 +6,7 @@ from typing import Any
 
 from fastapi import FastAPI, Header, HTTPException
 from fastapi.concurrency import run_in_threadpool
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, ValidationError
 
 from scf import config
 from scf.app.invoke import call_service
@@ -710,10 +710,21 @@ async def _run_remediation(
         trace_header=trace_header,
     )
     outcome["execution"] = receipt
+    try:
+        reported = ExecutionReceipt.model_validate(receipt)
+    except ValidationError as exc:
+        await run_in_threadpool(
+            repo.transition, incident_id, IncidentStatus.EXECUTION_FAILED,
+            trace_id=trace_id,
+        )
+        raise WorkflowFailure(
+            FailureCategory.WORKER_CONTRACT_INVALID,
+            f"executor receipt is not a valid contract ({exc.error_count()})",
+        ) from exc
 
     # The executor cannot write the control plane. The orchestrator, which is
     # an authoritative writer, records what the executor reported.
-    if receipt.get("duplicate"):
+    if reported.duplicate:
         await run_in_threadpool(
             repo.append_audit,
             incident_id,
@@ -743,7 +754,7 @@ async def _run_remediation(
                 "decision_id": policy_decision.decision_id,
                 "target_ref": receipt["action"].get("target_ref"),
                 "target_revision": receipt.get("target_revision"),
-                "accepted": bool(receipt.get("mutated")),
+                "accepted": reported.mutated,
                 "idempotency_key": receipt.get("idempotency_key"),
                 "execution_database": receipt.get("execution_database"),
             },
@@ -751,10 +762,10 @@ async def _run_remediation(
             trace_id=trace_id,
         )
 
-    if receipt.get("mutated"):
+    if reported.mutated:
         outcome["mutated_infrastructure"] = True
 
-    if not (receipt.get("mutated") or receipt.get("reconciled")):
+    if not reported.progressed():
         await run_in_threadpool(
             repo.transition, incident_id, IncidentStatus.EXECUTION_FAILED, trace_id=trace_id
         )
@@ -965,6 +976,30 @@ async def _verify_and_close(
     return outcome
 
 
+class ExecutionReceipt(BaseModel):
+    """What the executor reported, as a contract rather than truthiness.
+
+    `{"mutated": "false"}` is a non-empty string and therefore truthy: read with
+    `.get()` it would have been taken as a successful mutation, and the incident
+    would have advanced toward RESOLVED reporting a change that the receipt
+    itself denied. Strict booleans only.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    mutated: StrictBool = False
+    reconciled: StrictBool = False
+    duplicate: StrictBool = False
+    refused: StrictBool = False
+    state: str | None = None
+    reason: str | None = None
+    retryable: StrictBool | None = None
+
+    def progressed(self) -> bool:
+        """Did the authorized effect actually move forward?"""
+        return self.mutated or self.reconciled
+
+
 class VerifierVerdict(BaseModel):
     """The verifier's answer, as a contract rather than a hopeful `.get()`.
 
@@ -973,12 +1008,15 @@ class VerifierVerdict(BaseModel):
     allocation and a healthy response — all four present and all four true.
     """
 
+    # StrictBool, deliberately. Ordinary `bool` coercion accepts "yes", "true"
+    # and 1 — so a worker returning a *string* would have satisfied a boolean
+    # safety condition. Only a real JSON boolean counts.
     model_config = ConfigDict(extra="ignore")
 
     verdict: str
-    http_healthy: bool
-    revision_matches_authorized: bool
-    traffic_allocation_exclusive: bool
+    http_healthy: StrictBool
+    revision_matches_authorized: StrictBool
+    traffic_allocation_exclusive: StrictBool
 
     def recovered(self) -> bool:
         return (
@@ -999,9 +1037,9 @@ class TerminalizationReceipt(BaseModel):
 
     model_config = ConfigDict(extra="ignore")
 
-    verified: bool
+    verified: StrictBool
     state: str | None = None
-    serves_authorized_exclusively: bool | None = None
+    serves_authorized_exclusively: StrictBool | None = None
 
     def terminal(self) -> bool:
         return (

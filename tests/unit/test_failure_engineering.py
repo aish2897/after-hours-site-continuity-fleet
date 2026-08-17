@@ -749,6 +749,9 @@ def test_the_close_path_uses_the_typed_contracts():
         ("dispatch service unavailable", False),
         ("degraded but healthy", False),
         ("internal error: healthy check failed", False),
+        # Not failure reports: rejecting these would break a healthy service.
+        ('{"status":"healthy","errorCount":0}', True),
+        ("no errors detected; all systems healthy", True),
         ("", False),
         ("   ", False),
     ],
@@ -799,3 +802,82 @@ def test_the_budget_is_rechecked_after_each_step():
     assert "budget.spend(" in source
     loop = source[source.index("while True:"):]
     assert "budget.check(" in loop
+
+
+# --- Codex Gate E audit, round 2 ---------------------------------------------
+
+
+def test_a_string_cannot_satisfy_a_boolean_safety_condition():
+    """`"yes"`, `"true"` and `1` are not booleans. Ordinary bool coercion says otherwise."""
+    from scf.app.main import ExecutionReceipt, TerminalizationReceipt, VerifierVerdict
+
+    good = dict(verdict="RECOVERED", http_healthy=True,
+                revision_matches_authorized=True, traffic_allocation_exclusive=True)
+    for bad in ("yes", "true", 1, "1", "false"):
+        with pytest.raises(ValidationError):
+            VerifierVerdict.model_validate({**good, "http_healthy": bad})
+        with pytest.raises(ValidationError):
+            TerminalizationReceipt.model_validate(
+                {"verified": bad, "state": "VERIFIED",
+                 "serves_authorized_exclusively": True}
+            )
+        with pytest.raises(ValidationError):
+            ExecutionReceipt.model_validate({"mutated": bad})
+
+
+def test_a_string_false_is_not_a_successful_mutation():
+    """"false" is a non-empty string and therefore truthy under `.get()`."""
+    from scf.app.main import ExecutionReceipt
+
+    with pytest.raises(ValidationError):
+        ExecutionReceipt.model_validate({"mutated": "false", "reconciled": False})
+    assert not ExecutionReceipt(mutated=False, reconciled=False).progressed()
+    assert ExecutionReceipt(mutated=True).progressed()
+    assert ExecutionReceipt(reconciled=True).progressed()
+
+
+def test_the_execution_branch_uses_the_typed_receipt():
+    from scf.app import main
+
+    source = inspect.getsource(main._run_remediation)
+    assert "ExecutionReceipt.model_validate(receipt)" in source
+    assert "reported.progressed()" in source
+    # No safety decision reads the raw dict; only inert audit metadata does.
+    assert 'receipt.get("mutated")' not in source
+    assert 'receipt.get("duplicate")' not in source
+    assert 'receipt.get("reconciled")' not in source
+
+
+def test_an_unhealthy_body_warrants_remediation_even_on_http_200():
+    """A service answering 200 while saying it is unhealthy is unhealthy."""
+    from scf.tools import cloud_run_evidence
+
+    source = inspect.getsource(cloud_run_evidence.gather_evidence)
+    assert "live_healthy = status_code == 200 and body_is_healthy(body)" in source
+    assert '_ev("service_unhealthy", not live_healthy' in source
+    assert '_ev("service_unhealthy", status_code != 200' not in source
+
+
+def test_the_budget_charges_every_network_call():
+    """Three calls hiding inside one charged step is not a bounded step."""
+    from scf.app import investigator
+    from scf.tools import cloud_run_evidence
+
+    assert "charge" in inspect.signature(cloud_run_evidence.gather_evidence).parameters
+    gather = inspect.getsource(cloud_run_evidence.gather_evidence)
+    for call in ("describe_service", "probe_live_service", "probe_candidate_revision"):
+        assert f'spend("{call}")' in gather
+
+    source = inspect.getsource(investigator._investigate)
+    assert "charge=budget.spend" in source
+
+
+def test_every_probe_is_bounded_well_under_the_deadline():
+    from scf.app.investigator import WORK_DEADLINE_SECONDS
+    from scf.tools import cloud_run_evidence
+
+    source = inspect.getsource(cloud_run_evidence)
+    assert "timeout=30.0" not in source
+    assert "timeout=20.0" not in source
+    # Worst case is the deadline plus at most one call, and one call is small.
+    assert WORK_DEADLINE_SECONDS >= 30

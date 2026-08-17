@@ -33,6 +33,10 @@ app = FastAPI(title="SCF Systems Investigator", version="0.5.0")
 #: Bounded work. Both limits are deliberately small: this investigator makes
 #: four real Cloud Run/HTTP calls on the healthy path, so anything approaching
 #: these numbers is a loop, not thoroughness.
+#:
+#: The deadline is a real ceiling rather than a between-steps check: every
+#: network call charges the budget, and each carries a 10s client timeout, so
+#: the worst case is the deadline plus at most one call.
 MAX_TOOL_CALLS = int(os.environ.get("SCF_INVESTIGATOR_MAX_TOOL_CALLS", "12"))
 WORK_DEADLINE_SECONDS = float(os.environ.get("SCF_INVESTIGATOR_DEADLINE_SECONDS", "30"))
 
@@ -118,11 +122,12 @@ def _investigate(service: str, budget: WorkBudget) -> tuple[list[Evidence], Prop
         # the loop noticing anything — which is the point of the test.
         while True:
             budget.spend("runaway_evidence_pass")
-            gather_evidence(service)
+            gather_evidence(service, charge=budget.spend)
             budget.check("runaway_evidence_pass")
 
-    budget.spend("gather_evidence")
-    evidence = gather_evidence(service)
+    # Each network call inside gather_evidence charges the budget itself, so
+    # the deadline bounds the work rather than the gaps between steps.
+    evidence = gather_evidence(service, charge=budget.spend)
     budget.check("gather_evidence")
     budget.spend("propose_remediation")
     proposal = propose_remediation(evidence, service)

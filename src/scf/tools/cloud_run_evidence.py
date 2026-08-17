@@ -9,6 +9,7 @@ what may be done about it.
 from __future__ import annotations
 
 import re
+from collections.abc import Callable
 from typing import Any
 
 import google.auth
@@ -42,7 +43,7 @@ def describe_service(service: str) -> dict[str, Any]:
     response = httpx.get(
         f"{RUN_API}/{_service_path(service)}",
         headers={"Authorization": f"Bearer {_access_token()}"},
-        timeout=30.0,
+        timeout=10.0,
     )
     response.raise_for_status()
     return response.json()
@@ -52,7 +53,7 @@ def list_revisions(service: str) -> list[dict[str, Any]]:
     response = httpx.get(
         f"{RUN_API}/{_service_path(service)}/revisions",
         headers={"Authorization": f"Bearer {_access_token()}"},
-        timeout=30.0,
+        timeout=10.0,
     )
     response.raise_for_status()
     return response.json().get("revisions", [])
@@ -83,8 +84,14 @@ def serves_exclusively(described: dict[str, Any], revision: str) -> bool:
 
 #: Bodies that assert health. Matched as whole words against a bounded read.
 _HEALTHY_MARKERS = frozenset({"healthy", "ok", "ready", "serving"})
-#: Any of these appearing anywhere in the body disqualifies it outright.
-_UNHEALTHY_MARKERS = ("unhealthy", "not healthy", "unavailable", "error", "degraded")
+#: Whole words that disqualify a body outright. Matched as words, not raw
+#: substrings: `errorCount` and `no errors detected` are not failure reports,
+#: and rejecting them would make a healthy service look broken.
+_UNHEALTHY_WORDS = frozenset(
+    {"unhealthy", "unavailable", "degraded", "failing", "failed", "failure", "down"}
+)
+#: Phrases that negate a positive marker and cannot be caught word-by-word.
+_UNHEALTHY_PHRASES = ("not healthy", "not ok", "not ready", "not serving")
 
 
 def body_is_healthy(body: str) -> bool:
@@ -99,9 +106,11 @@ def body_is_healthy(body: str) -> bool:
     text = body.strip().lower()
     if not text:
         return False
-    if any(marker in text for marker in _UNHEALTHY_MARKERS):
+    if any(phrase in text for phrase in _UNHEALTHY_PHRASES):
         return False
     words = set(re.findall(r"[a-z]+", text))
+    if words & _UNHEALTHY_WORDS:
+        return False
     return bool(words & _HEALTHY_MARKERS)
 
 
@@ -113,7 +122,7 @@ def probe(url: str) -> tuple[int, bool, str]:
 
 def probe_health(url: str) -> tuple[int, str]:
     try:
-        response = httpx.get(url, timeout=20.0, follow_redirects=True)
+        response = httpx.get(url, timeout=10.0, follow_redirects=True)
         return response.status_code, response.text.strip()
     except httpx.HTTPError as exc:
         return 0, f"unreachable: {type(exc).__name__}"
@@ -132,8 +141,16 @@ def _ev(key: str, value: Any, supports: str) -> Evidence:
 KNOWN_GOOD_TAG = "known-good"
 
 
-def gather_evidence(service: str = config.DISPATCH_WEB_SERVICE) -> list[Evidence]:
+def gather_evidence(
+    service: str = config.DISPATCH_WEB_SERVICE,
+    charge: Callable[[str], None] | None = None,
+) -> list[Evidence]:
     """Collect real Cloud Run state as trusted evidence.
+
+    `charge` lets a caller's work budget account for each network call rather
+    than for the function as a whole. Without it, three calls with their own
+    timeouts hide inside one charged step, and a deadline measured only between
+    steps does not bound what a step can cost.
 
     The rollback candidate is NOT inferred from "some revision that is not
     currently active". It is the revision an operator has explicitly approved
@@ -141,6 +158,9 @@ def gather_evidence(service: str = config.DISPATCH_WEB_SERVICE) -> list[Evidence
     independently probes that tag's own URL to prove it actually serves a
     healthy response before anything may be proposed.
     """
+    spend = charge or (lambda _what: None)
+
+    spend("describe_service")
     described = describe_service(service)
     url = described.get("uri", "")
     etag = described.get("etag", "")
@@ -157,9 +177,15 @@ def gather_evidence(service: str = config.DISPATCH_WEB_SERVICE) -> list[Evidence
             candidate_revision = revision
             candidate_url = entry.get("uri") or ""
 
+    spend("probe_live_service")
     status_code, body = probe_health(url)
+    # Not status alone. A service answering 200 with a body that says it is
+    # unhealthy is unhealthy; reading only the status code would let it report
+    # its own failure and be ignored.
+    live_healthy = status_code == 200 and body_is_healthy(body)
     approved = bool(candidate_revision) and candidate_revision != active_revision
 
+    spend("probe_candidate_revision")
     candidate_status, candidate_body = (
         probe_health(candidate_url) if candidate_url else (0, "no known-good tag")
     )
@@ -172,7 +198,8 @@ def gather_evidence(service: str = config.DISPATCH_WEB_SERVICE) -> list[Evidence
         _ev("active_revision", active_revision, "revision currently serving traffic"),
         _ev("http_status", status_code, "observed health of the live service"),
         _ev("http_body", body[:200], "observed response body"),
-        _ev("service_unhealthy", status_code != 200, "whether remediation is warranted"),
+        _ev("service_unhealthy", not live_healthy,
+            "whether remediation is warranted: status AND what the body says"),
         _ev("candidate_revision", candidate_revision or None,
             "operator-approved rollback target, from the known-good tag"),
         _ev("candidate_revision_approved", approved,
