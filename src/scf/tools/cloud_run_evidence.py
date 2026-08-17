@@ -8,6 +8,7 @@ what may be done about it.
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 import google.auth
@@ -80,6 +81,36 @@ def serves_exclusively(described: dict[str, Any], revision: str) -> bool:
     return bool(revision) and traffic_allocation(described) == {revision: 100}
 
 
+#: Bodies that assert health. Matched as whole words against a bounded read.
+_HEALTHY_MARKERS = frozenset({"healthy", "ok", "ready", "serving"})
+#: Any of these appearing anywhere in the body disqualifies it outright.
+_UNHEALTHY_MARKERS = ("unhealthy", "not healthy", "unavailable", "error", "degraded")
+
+
+def body_is_healthy(body: str) -> bool:
+    """Whether a probe body asserts health, without being fooled by negation.
+
+    The naive check was `"healthy" in body.lower()`, which is satisfied by the
+    word **un**healthy. A service reporting that it is unhealthy would have been
+    read as healthy — the exact inversion of the signal. Negative markers are
+    therefore rejected first, and the positive marker must appear as a whole
+    word rather than as a substring of something else.
+    """
+    text = body.strip().lower()
+    if not text:
+        return False
+    if any(marker in text for marker in _UNHEALTHY_MARKERS):
+        return False
+    words = set(re.findall(r"[a-z]+", text))
+    return bool(words & _HEALTHY_MARKERS)
+
+
+def probe(url: str) -> tuple[int, bool, str]:
+    """(status, healthy, body) for a read-only probe. One place, one rule."""
+    status_code, body = probe_health(url)
+    return status_code, status_code == 200 and body_is_healthy(body), body
+
+
 def probe_health(url: str) -> tuple[int, str]:
     try:
         response = httpx.get(url, timeout=20.0, follow_redirects=True)
@@ -132,7 +163,7 @@ def gather_evidence(service: str = config.DISPATCH_WEB_SERVICE) -> list[Evidence
     candidate_status, candidate_body = (
         probe_health(candidate_url) if candidate_url else (0, "no known-good tag")
     )
-    candidate_healthy = candidate_status == 200 and "healthy" in candidate_body.lower()
+    candidate_healthy = candidate_status == 200 and body_is_healthy(candidate_body)
 
     return [
         _ev("service_exists", True, "target is a real Cloud Run service"),

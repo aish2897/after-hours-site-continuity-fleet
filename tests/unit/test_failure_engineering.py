@@ -403,11 +403,13 @@ def test_malformed_worker_evidence_is_a_categorised_failure():
 
 
 def test_a_verifier_verdict_outside_the_contract_is_not_recovery():
-    from scf.app import main
+    """Superseded by the typed contract: see test_a_verdict_string_alone_is_not_recovery."""
+    from scf.app.main import VerifierVerdict
 
-    source = inspect.getsource(main._verify_and_close)
-    # Only the exact string RECOVERED proceeds; anything else fails closed.
-    assert 'verdict.get("verdict") != "RECOVERED"' in source
+    assert not VerifierVerdict(
+        verdict="PROBABLY_FINE", http_healthy=True,
+        revision_matches_authorized=True, traffic_allocation_exclusive=True,
+    ).recovered()
 
 
 # --- E12 no blind retry ------------------------------------------------------
@@ -657,3 +659,143 @@ def test_reconciliation_does_not_escalate_work_another_worker_completed():
     landed_at = source.index("_execution_already_landed(receipt)")
     escalate_at = source.index("IncidentStatus.ESCALATED", landed_at)
     assert landed_at < escalate_at
+
+
+# --- Codex Gate E audit ------------------------------------------------------
+
+
+def test_a_non_object_downstream_response_is_a_typed_failure():
+    """200 + JSON `[]` from an authenticated worker must not strand an incident."""
+    from scf.app import main
+
+    source = inspect.getsource(main._call)
+    assert "isinstance(body, dict)" in source
+    assert "malformed_response" in source
+
+
+def test_nothing_can_strand_an_incident_mid_flight():
+    from scf.app import main
+
+    source = inspect.getsource(main._autonomous_remediation)
+    assert "except Exception" in source
+    assert "workflow_unexpected_error" in source
+    # The catch-all still goes through the taxonomy, not around it.
+    tail = source[source.index("except Exception"):]
+    assert "_fail(" in tail
+    assert "REMEDIATION_FAILED" in tail
+
+
+def test_a_truthy_flag_alone_cannot_resolve_an_incident():
+    """`{"verified": true}` is not terminalization."""
+    from scf.app.main import TerminalizationReceipt
+
+    assert not TerminalizationReceipt(verified=True).terminal()
+    assert not TerminalizationReceipt(verified=True, state="MUTATED").terminal()
+    assert not TerminalizationReceipt(
+        verified=True, state="VERIFIED", serves_authorized_exclusively=False
+    ).terminal()
+    assert TerminalizationReceipt(
+        verified=True, state="VERIFIED", serves_authorized_exclusively=True
+    ).terminal()
+    assert not TerminalizationReceipt(
+        verified=False, state="VERIFIED", serves_authorized_exclusively=True
+    ).terminal()
+
+
+def test_a_verdict_string_alone_is_not_recovery():
+    from scf.app.main import VerifierVerdict
+
+    good = dict(verdict="RECOVERED", http_healthy=True,
+                revision_matches_authorized=True, traffic_allocation_exclusive=True)
+    assert VerifierVerdict(**good).recovered()
+    for field in ("http_healthy", "revision_matches_authorized",
+                  "traffic_allocation_exclusive"):
+        assert not VerifierVerdict(**{**good, field: False}).recovered(), field
+    assert not VerifierVerdict(**{**good, "verdict": "PROBABLY_FINE"}).recovered()
+
+
+def test_a_missing_verdict_field_is_a_contract_failure():
+    from scf.app.main import TerminalizationReceipt, VerifierVerdict
+
+    with pytest.raises(ValidationError):
+        VerifierVerdict.model_validate({"verdict": "RECOVERED"})
+    with pytest.raises(ValidationError):
+        TerminalizationReceipt.model_validate({})
+
+
+def test_the_close_path_uses_the_typed_contracts():
+    from scf.app import main
+
+    source = inspect.getsource(main._verify_and_close)
+    assert "checked.recovered()" in source
+    assert "closed.terminal()" in source
+    assert 'terminal.get("verified")' not in source
+    assert 'verdict.get("verdict") != "RECOVERED"' not in source
+
+
+# --- health signal -----------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "body,healthy",
+    [
+        ("dispatch service healthy", True),
+        ("healthy", True),
+        ("OK", True),
+        ("ready", True),
+        ("unhealthy", False),
+        ("dispatch service unhealthy", False),
+        ("not healthy", False),
+        ("dispatch service unavailable", False),
+        ("degraded but healthy", False),
+        ("internal error: healthy check failed", False),
+        ("", False),
+        ("   ", False),
+    ],
+)
+def test_a_service_calling_itself_unhealthy_is_never_read_as_healthy(body, healthy):
+    """The naive check was satisfied by the word UNhealthy — the exact inversion."""
+    from scf.tools.cloud_run_evidence import body_is_healthy
+
+    assert body_is_healthy(body) is healthy
+
+
+def test_no_substring_health_check_survives_anywhere():
+    """Executable code only — the fix's own docstring quotes the old bug."""
+    import ast
+    import pathlib
+
+    root = pathlib.Path(__file__).resolve().parents[2] / "src"
+    for path in root.rglob("*.py"):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef,
+                                 ast.ClassDef)) and ast.get_docstring(node):
+                node.body = node.body[1:]
+        code = ast.unparse(tree)
+        assert "'healthy' in body" not in code, path
+        assert "'healthy' in candidate_body" not in code, path
+
+
+def test_every_health_decision_goes_through_one_predicate():
+    from scf.app import executor, verifier
+    from scf.tools import cloud_run_evidence
+
+    for module in (executor, verifier, cloud_run_evidence):
+        source = inspect.getsource(module)
+        if "body_is_healthy" in source or module is cloud_run_evidence:
+            continue
+        raise AssertionError(f"{module.__name__} decides health without the predicate")
+
+
+# --- worker budget bounds the step, not just the gap -------------------------
+
+
+def test_the_budget_is_rechecked_after_each_step():
+    from scf.app import investigator
+
+    source = inspect.getsource(investigator._investigate)
+    assert source.count("budget.check(") >= 2
+    assert "budget.spend(" in source
+    loop = source[source.index("while True:"):]
+    assert "budget.check(" in loop

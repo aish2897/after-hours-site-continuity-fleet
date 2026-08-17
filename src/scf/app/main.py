@@ -363,9 +363,18 @@ async def _call(
             service, f"http_{response.status_code}", response.text
         )
     try:
-        return response.json()
+        body = response.json()
     except ValueError as exc:
         raise DownstreamFailure(service, "malformed_response", str(exc)) from exc
+    if not isinstance(body, dict):
+        # A worker may be authenticated, return 200, and still hand back a list,
+        # a string or null. Every caller downstream treats this as a mapping, so
+        # letting it through would raise an AttributeError deep in the workflow
+        # — outside the failure taxonomy, and with the incident left mid-flight.
+        raise DownstreamFailure(
+            service, "malformed_response", f"expected a JSON object, got {type(body).__name__}"
+        )
+    return body
 
 
 #: Transport-level failures that mean "the worker never answered in time".
@@ -542,6 +551,27 @@ async def _autonomous_remediation(
             repo,
             incident_id,
             WorkflowFailure(_categorise(failure), f"{failure.service}/{failure.kind}"),
+            trace_id,
+            outcome,
+        )
+    except Exception as exc:  # noqa: BLE001 - nothing may strand an incident
+        # A bug here must not leave an incident mid-flight with no handover.
+        # Anything uncategorised is treated as a remediation failure, which
+        # escalates: the safe direction when we do not know what happened.
+        log_event(
+            "workflow_unexpected_error",
+            severity="ERROR",
+            trace_id=trace_id,
+            incident_id=incident_id,
+            error_type=type(exc).__name__,
+        )
+        return await _fail(
+            repo,
+            incident_id,
+            WorkflowFailure(
+                FailureCategory.REMEDIATION_FAILED,
+                f"unexpected workflow error ({type(exc).__name__})",
+            ),
             trace_id,
             outcome,
         )
@@ -802,6 +832,19 @@ async def _verify_and_close(
         )
 
     outcome["verification"] = verdict
+    try:
+        checked = VerifierVerdict.model_validate(verdict)
+    except ValidationError as exc:
+        return await _fail(
+            repo,
+            incident_id,
+            WorkflowFailure(
+                FailureCategory.WORKER_CONTRACT_INVALID,
+                f"verifier response is not a valid verdict ({exc.error_count()})",
+            ),
+            trace_id,
+            outcome,
+        )
     await run_in_threadpool(
         repo.append_audit,
         incident_id,
@@ -816,7 +859,7 @@ async def _verify_and_close(
         trace_id=trace_id,
     )
 
-    if verdict.get("verdict") != "RECOVERED":
+    if not checked.recovered():
         await run_in_threadpool(
             repo.transition,
             incident_id,
@@ -859,6 +902,19 @@ async def _verify_and_close(
             outcome,
         )
     outcome["terminalization"] = terminal
+    try:
+        closed = TerminalizationReceipt.model_validate(terminal)
+    except ValidationError as exc:
+        return await _fail(
+            repo,
+            incident_id,
+            WorkflowFailure(
+                FailureCategory.WORKER_CONTRACT_INVALID,
+                f"terminalization response is not a valid receipt ({exc.error_count()})",
+            ),
+            trace_id,
+            outcome,
+        )
     await run_in_threadpool(
         repo.append_audit,
         incident_id,
@@ -876,7 +932,7 @@ async def _verify_and_close(
         trace_id=trace_id,
     )
 
-    if not terminal.get("verified"):
+    if not closed.terminal():
         await run_in_threadpool(
             repo.transition,
             incident_id,
@@ -907,6 +963,52 @@ async def _verify_and_close(
     )
     outcome["final_status"] = IncidentStatus.RESOLVED.value
     return outcome
+
+
+class VerifierVerdict(BaseModel):
+    """The verifier's answer, as a contract rather than a hopeful `.get()`.
+
+    A 200 from an authenticated verifier is not a verdict. Recovery requires the
+    verdict string, the exact authorized revision, an exclusive traffic
+    allocation and a healthy response — all four present and all four true.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    verdict: str
+    http_healthy: bool
+    revision_matches_authorized: bool
+    traffic_allocation_exclusive: bool
+
+    def recovered(self) -> bool:
+        return (
+            self.verdict == "RECOVERED"
+            and self.http_healthy
+            and self.revision_matches_authorized
+            and self.traffic_allocation_exclusive
+        )
+
+
+class TerminalizationReceipt(BaseModel):
+    """The executor's terminalization answer, likewise typed.
+
+    `{"verified": true}` alone must never close an incident. The execution has
+    to actually be in the terminal state, and the executor has to have
+    re-observed the authorized revision serving exclusively.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    verified: bool
+    state: str | None = None
+    serves_authorized_exclusively: bool | None = None
+
+    def terminal(self) -> bool:
+        return (
+            self.verified
+            and self.state == "VERIFIED"
+            and self.serves_authorized_exclusively is True
+        )
 
 
 #: Execution states meaning the authorized effect has been issued or completed

@@ -18,6 +18,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from scf import config, faults
 from scf.obs import log_event, trace_id_from_header
 from scf.tools.cloud_run_evidence import (
+    body_is_healthy,
     describe_service,
     probe_health,
     serves_exclusively,
@@ -72,7 +73,7 @@ def _observe(service: str, expected_revision: str | None = None) -> dict[str, An
     active = next((rev for rev, pct in allocation.items() if pct == 100), "")
 
     status_code, body = probe_health(url)
-    responding = status_code == 200 and "healthy" in body.lower()
+    responding = status_code == 200 and body_is_healthy(body)
     revision_matches = expected_revision is None or active == expected_revision
     allocation_exclusive = (
         serves_exclusively(described, expected_revision)

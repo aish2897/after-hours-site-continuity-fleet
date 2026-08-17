@@ -511,13 +511,20 @@ all four services            healthy, fault_mode: null
 
 ## Tests
 
-**Offline: 334 passed, 11 skipped** — including 55 Gate E contract tests
+**Offline: 355 passed, 11 skipped** — including 76 Gate E contract tests
 covering fault-injection isolation, malformed model output at the parser,
 dangerous and unknown actions, call bounds, budget exhaustion, doing nothing,
 authenticated-but-invalid worker payloads, retry budgets, escalation-package
 completeness and leakage, and taxonomy consistency.
 
-**Live decisive tests:** all fourteen rows of the matrix above.
+**Live scenarios:** all fourteen rows of the matrix above ran end to end
+against the deployed fleet. They are not all *live platform failures*, and the
+matrix says which is which: the timeout, both 503s, the 409 conflict, the
+candidate probe and the final recovery are failures produced by Google
+infrastructure, while the malformed model output, the dangerous and unknown
+actions, the runaway loop and the malformed worker payload are controlled
+payloads driven through the real parser, the real gate and the real caller.
+Both kinds are real runs; only the first kind is evidence about the platform.
 
 ---
 

@@ -266,10 +266,14 @@ hidden.
 
 ## Observability
 
-One OpenTelemetry trace per incident, spanning intake → orchestrator →
+One correlation id per incident, carried through intake → orchestrator →
 investigator → policy → executor → verifier.
 
-**Status: structured Cloud Logging correlation only.** Every service emits JSON
+**Status: structured Cloud Logging correlation only. There is no OpenTelemetry
+instrumentation in this codebase** — no tracer, no spans, no exporter. What
+exists is a `trace_id` written into every JSON log entry and stored on the
+incident document, which is enough to reconstruct a whole flow (including a
+fault path) from logs alone, and is not distributed tracing. Every service emits JSON
 entries carrying the same `trace_id`, and the `trace_id` is stored on the
 incident document so the audit trail and the logs can be correlated from either
 direction. **No span has been exported to Cloud Trace.** OpenTelemetry export is

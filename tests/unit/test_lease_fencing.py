@@ -366,7 +366,8 @@ def test_incident_is_never_resolved_before_the_execution_is_terminal():
 
     source = inspect.getsource(main._verify_and_close)
     assert source.index("/terminalize") < source.index("IncidentStatus.RESOLVED")
-    assert 'if not terminal.get("verified")' in source
+    # Gate E replaced the truthy flag with a typed receipt; the property holds.
+    assert "closed.terminal()" in source
 
 
 def test_verification_unavailable_leaves_the_incident_reconcilable():

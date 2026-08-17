@@ -68,9 +68,20 @@ class WorkBudget:
         return time.monotonic() - self._started
 
     def spend(self, what: str) -> None:
+        """Charge a step. Raises if either limit is already passed."""
         self.calls += 1
         if self.calls > self.max_calls:
             raise BudgetExhausted("tool_calls", self.calls, self.max_calls, what)
+        self.check(what)
+
+    def check(self, what: str) -> None:
+        """Re-check the clock. Called AFTER each step as well as before it.
+
+        Checking only on the way in bounds the work between steps, not the step
+        itself: a single call could then run long and the budget would not
+        notice until the next one. Each underlying HTTP call carries its own
+        timeout, so the real bound is the deadline plus at most one step.
+        """
         if self.elapsed > self.deadline_seconds:
             raise BudgetExhausted(
                 "deadline_seconds", round(self.elapsed, 1), self.deadline_seconds, what
@@ -108,11 +119,14 @@ def _investigate(service: str, budget: WorkBudget) -> tuple[list[Evidence], Prop
         while True:
             budget.spend("runaway_evidence_pass")
             gather_evidence(service)
+            budget.check("runaway_evidence_pass")
 
     budget.spend("gather_evidence")
     evidence = gather_evidence(service)
+    budget.check("gather_evidence")
     budget.spend("propose_remediation")
     proposal = propose_remediation(evidence, service)
+    budget.check("propose_remediation")
     return evidence, proposal
 
 

@@ -80,6 +80,7 @@ from scf.state.execution_store import (
 )
 from scf.tools.cloud_run_evidence import (
     KNOWN_GOOD_TAG,
+    body_is_healthy,
     describe_service,
     probe_health,
     serves_exclusively,
@@ -264,11 +265,11 @@ def _observe(service: str) -> dict[str, Any]:
         "traffic_allocation": allocation,
         "etag": described.get("etag", ""),
         "http_status": status_code,
-        "healthy": status_code == 200 and "healthy" in body.lower(),
+        "healthy": status_code == 200 and body_is_healthy(body),
         "candidate_revision": candidate_revision,
         "candidate_probe_http_status": candidate_status,
         "candidate_probe_healthy": candidate_status == 200
-        and "healthy" in candidate_body.lower(),
+        and body_is_healthy(candidate_body),
     }
 
 
@@ -877,7 +878,7 @@ async def terminalize(
     described = await run_in_threadpool(describe_service, target_ref)
     exclusive = serves_exclusively(described, authorized_revision)
     status_code, body = await run_in_threadpool(probe_health, described.get("uri", ""))
-    healthy = status_code == 200 and "healthy" in body.lower()
+    healthy = status_code == 200 and body_is_healthy(body)
     allocation = traffic_allocation(described)
 
     evidence = {
