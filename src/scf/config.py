@@ -24,8 +24,12 @@ ARTIFACT_REGISTRY_REGION: Final[str] = CORE_REGION
 # Flash has no Sydney endpoint either, so downgrading does not avoid this.
 #
 # `global` is therefore the deliberate, approved primary inference location,
-# not a fallback. Untrusted content must pass the classification and security
-# boundary before it is sent here.
+# not a fallback.
+#
+# Note what is NOT true today: there is no classification or Model Armor step
+# between the duty manager's report text and this endpoint. The raw description
+# is passed to the routing agent. The trust-level separation protects the
+# authorization path, not the model input. See SECURITY.md.
 
 MODEL_LOCATION: Final[str] = "global"
 REQUESTED_MODEL_ID: Final[str] = "gemini-3.7-flash"

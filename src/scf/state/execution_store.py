@@ -286,7 +286,13 @@ class ExecutionStore:
         expect_states: tuple[ExecutionState, ...] | None = None,
         **fields: Any,
     ) -> tuple[str, dict[str, Any] | None]:
-        """Ownership-bound lifecycle progress. Never deletes, never rewinds.
+        """Ownership-bound lifecycle progress. Never deletes.
+
+        Not strictly forward-only: the executor deliberately winds a record back
+        from `MUTATION_REQUESTED` to `PRECONDITION_CHECKED` when Google refuses
+        the write with 409 ABORTED, because that response is proof no mutation
+        was applied and the record should not claim one was attempted. Every
+        such move is still subject to the full compare-and-set below.
 
         Atomically requires, in one transaction: the document exists, it is not
         terminal, `lease_owner` matches, `lease_epoch` matches, the lease has

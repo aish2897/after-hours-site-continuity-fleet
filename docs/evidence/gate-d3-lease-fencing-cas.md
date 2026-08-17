@@ -607,6 +607,30 @@ every execution that has reached the point of issuing its mutation. It is not a
 claim that a duplicate Cloud Run *call* is impossible in every ordering — the
 D3.5 stale-worker window remains, and remains documented.
 
+## Codex hostile review — rounds 4 to 7
+
+The loop ran until the reviewer stopped finding correctness defects, and then
+two rounds further to sweep the documentation. **Rounds 4, 5, 6 and 7 each
+returned no Critical and no High.** Every Medium raised in them was accepted and
+fixed; none was argued away.
+
+| Round | Findings | Disposition |
+|---|---|---|
+| 4 | The 409 rewind result was ignored, and the "409 preserves a legitimate retry" claim was wider than the code — the orchestrator escalated anyway. The evidence still carried a round-1 line saying terminalization accepts `MUTATION_REQUESTED`, which round 2 reversed. | The rewind outcome is returned as `conflict_rewind` / `retryable`; a conflict counts as retryable only if Google refused the write **and** the rewind succeeded; a genuinely rewound conflict now leaves the incident at the non-terminal `EXECUTION_FAILED` instead of closing it. Stale line corrected. |
+| 5 | The executor declared a rewound conflict retryable while still holding its lease, so an immediate `/reconcile` got `HELD_BY_OTHER` and escalated. Waiting out the 120 s lease worked; not waiting did not. | The lease is released when — and only when — the rewind succeeded. An execution still marked as attempted keeps its lease. Round 5 also traced the post-release takeover and confirmed it cannot produce a second mutation. |
+| 6 | The stated test count was stale. `deployment/gcp-checklist.md` and `docs/demo-script.md` still marked verified capabilities as pending, contradicting the README. A comment above the terminalization guard still described the behaviour round 2 reversed. | All three fixed, and two now have tests: the suite asserts the evidence's stated count matches what the session collects, and that no planning document describes a verified capability as pending. The checklist states the README table wins any disagreement. |
+| 7 | Six consistency defects: this narrative omitted round 6; `ARCHITECTURE.md` and `config.py` implied untrusted content passes a classification boundary before the global endpoint when no such step exists; the `advance()` docstring said "never rewinds" while the 409 path deliberately does; the Gate D and Gate C evidence still described superseded behaviour (`attempt_intent`, `run.operations.get`); and the README marked the policy gate and audit `IMPLEMENTED` while `STATUS.md` listed both verified. | All six fixed. The most substantive is the second: the report text is now documented as reaching the model **uninspected**, because it is. Superseded evidence carries an in-place correction rather than being quietly edited. |
+
+The second round-7 finding is worth stating on its own, because it is the kind
+of thing a hostile judge should catch and we would rather state first:
+
+> **There is no classification or Model Armor step between the duty manager's
+> report text and the `global` inference endpoint.** The raw description is
+> passed to the routing agent. The trust-level separation protects the
+> *authorization* path — untrusted text can never satisfy a policy condition —
+> and nothing more. Model Armor is PLANNED and NOT INTEGRATED, and no
+> prompt-injection resistance is claimed anywhere.
+
 ## IAM and Gate D.1 regression (Tests N, O)
 
 Run as the real `sa-executor`. **No IAM was changed in this gate.**

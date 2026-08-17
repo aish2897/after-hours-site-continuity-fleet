@@ -102,6 +102,15 @@ The key is derived, never generated:
 sha256(incident_id | action_type | target_ref | decision_id | attempt_intent)
 ```
 
+> **Superseded at Gate D.2.** `attempt_intent` was caller-supplied, so any
+> client able to reach the executor could mint a fresh key and re-run a
+> completed mutation. It was removed from both the derivation and the request
+> schema. The current identity is
+> `sha256(incident_id | action_type | target_ref | decision_id)` — see
+> `src/scf/domain/ids.py` and
+> [`gate-d2`](gate-d2-execution-correctness.md). This section is kept as the
+> record of what was true at Gate D, not as a description of current behaviour.
+
 It is claimed with a Firestore `create`, which fails if the document already
 exists. That failure *is* the duplicate signal — no read-then-write race, no
 in-memory set, no process-local lock, no UUID.

@@ -38,13 +38,19 @@ below.
 
 Candidate permissions were tested and reduced, not assumed.
 
-**`scfRemediator`** (custom role) — 3 permissions:
+**`scfRemediator`** (custom role) — 3 permissions at Gate C:
 
 ```
 run.services.get
 run.services.update
 run.operations.get
 ```
+
+> **Reduced at Gate D.** `run.operations.get` was removed. A Cloud Run
+> operation is a distinct resource from the service, so a service-scoped role
+> cannot read it; rather than broaden the grant, operation polling was deleted
+> and the independent verifier establishes recovery instead. The role is now
+> **2 permissions**. `infra/iam-matrix.md` is the authoritative record.
 
 `run.revisions.get` and `run.revisions.list` were in the candidate set and
 proved **unnecessary** for traffic migration. They were left out.

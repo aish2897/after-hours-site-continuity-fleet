@@ -22,7 +22,7 @@ This table is the project's honesty mechanism.
 | State | Meaning |
 |---|---|
 | `NOT INTEGRATED` | Not built. |
-| `IMPLEMENTED` | Code exists and local tests pass. Not yet exercised against real infrastructure. |
+| `IMPLEMENTED` | Code exists and local tests pass. No dedicated live evidence artifact — some of these do run in the live path, but nothing here is claimed on that basis. |
 | `VERIFIED` | Exercised for real, with a saved evidence artifact in `docs/evidence/`. |
 
 Nothing in this repo, the demo video, or the Devpost entry may claim a
@@ -69,11 +69,11 @@ capability beyond the state recorded here.
 | Closed incident cannot be re-executed | **`VERIFIED`** | [`gate-d3`](docs/evidence/gate-d3-lease-fencing-cas.md) |
 | Reconciliation after an unreachable executor | **`VERIFIED`** | [`gate-d3`](docs/evidence/gate-d3-lease-fencing-cas.md) |
 | An attempted execution never mutates twice | **`VERIFIED`** | [`gate-d3`](docs/evidence/gate-d3-lease-fencing-cas.md) |
-| Deterministic policy gate | `IMPLEMENTED` | `tests/policy/test_decision_matrix.py` — 26 |
+| Deterministic policy gate | **`VERIFIED`** | [`gate-d`](docs/evidence/gate-d-autonomous-recovery.md) · [`gate-d3`](docs/evidence/gate-d3-lease-fencing-cas.md) — authorized every live run |
 | Agent capability registry | `IMPLEMENTED` | `tests/policy/test_registry.py` — 9 |
-| Incident state machine | `IMPLEMENTED` | `tests/unit/test_state_machine.py` — 15 |
-| Deterministic idempotency keys | `IMPLEMENTED` | `tests/unit/test_ids.py` — 8 |
-| Hash-chained audit + tamper detection | `IMPLEMENTED` | `tests/unit/test_audit_chain.py` — 9 |
+| Incident state machine | **`VERIFIED`** | [`gate-d3`](docs/evidence/gate-d3-lease-fencing-cas.md) — every live run walks it; illegal transitions refused |
+| Deterministic idempotency keys | **`VERIFIED`** | [`gate-d2`](docs/evidence/gate-d2-execution-correctness.md) · [`gate-d3`](docs/evidence/gate-d3-lease-fencing-cas.md) — one identity across 200 requests |
+| Hash-chained audit + tamper detection | **`VERIFIED`** | [`gate-d3`](docs/evidence/gate-d3-lease-fencing-cas.md) — chains verified against live incidents |
 | Trusted/untrusted evidence separation | `IMPLEMENTED` | `tests/policy/test_decision_matrix.py` |
 | Cloud Trace end-to-end spans | `NOT INTEGRATED` | logging correlation only |
 | Model Armor | `NOT INTEGRATED` | Melbourne, next |

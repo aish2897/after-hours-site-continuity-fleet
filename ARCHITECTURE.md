@@ -104,15 +104,23 @@ Australian Google Cloud infrastructure. Model inference does not.
 **Complete Australian data residency is not claimed anywhere in this project.**
 The competition environment uses synthetic data only.
 
-Because inference leaves the country, the classification and security boundary
-is load-bearing rather than decorative: untrusted incident content is inspected
-by Model Armor in Melbourne *before* it reaches an agent or a tool, and
-sensitive or policy-restricted content must never be silently forwarded to the
-global endpoint.
+Because inference leaves the country, a classification and security boundary
+would be load-bearing rather than decorative. **No such boundary exists today.**
+Stated plainly, because the distinction matters: the duty manager's report text
+is sent to the routing agent — and therefore to the `global` endpoint —
+*without* any inspection step. `create_incident` calls `route_incident(...)`
+with the raw description.
 
-**Status: PLANNED.** Model Armor is NOT integrated. Until it is, the boundary
-that actually holds is the trust-level separation: untrusted report text is
-recorded as `UNTRUSTED_INPUT` and can never satisfy a policy condition. No
+**PLANNED, NOT INTEGRATED.** The intended design inspects untrusted incident
+content with Model Armor in Melbourne before it reaches an agent or a tool, so
+that sensitive or policy-restricted content is never silently forwarded to the
+global endpoint. Model Armor is not integrated and that inspection does not
+happen.
+
+The boundary that *does* hold is narrower and different in kind: untrusted
+report text is recorded as `UNTRUSTED_INPUT` and can never satisfy a policy
+condition, so it cannot influence an authorization decision. That protects the
+*authorization* path. It does not stop the text reaching the model, and no
 prompt-injection resistance is claimed.
 
 ## State — two planes
