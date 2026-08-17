@@ -256,9 +256,9 @@ exist, which produced a real Google `HTTP 404` — what an unavailable verifier
 looks like from the caller's side. No IAM was changed.
 
 ```
-incident                      INC-20260817-58888B
+incident                      INC-20260817-FA64AB
 execution mutated             True
-resource_version_sent         AAZZM2y5ZjY
+resource_version_sent         AAZZM+Q71jM
 live after mutation           HTTP 200, dispatch-web-00003-x87
 downstream failure            verifier / http_404
 incident status               REMEDIATION_FAILED     (NOT resolved, NOT terminal)
@@ -277,12 +277,12 @@ POST /incidents/{id}/reconcile          (names an incident; supplies no authoriz
   verifier                   RECOVERED
   terminalization            ADVANCED -> VERIFIED, serves_authorized_exclusively True
   incident                   RESOLVED
-  generation before/after    79 / 79        no blind second mutation
+  generation before/after    95 / 95        no blind second mutation
 ```
 
 Total infrastructure effect across the entire scenario — the failed run, a
 100-way storm, and recovery — was **one** authorized target transition:
-`generation 78 → 79`.
+`generation 94 → 95`.
 
 ## D3.11 — 100-way same-decision concurrency (Test G)
 
@@ -298,7 +298,7 @@ outcomes                      RECOVERED     1
 mutations                     0
 distinct execution ids        1
 distinct lease epochs         1   (epoch 2)
-generation before / after     79 / 79
+generation before / after     95 / 95
 live                          HTTP 200, dispatch-web-00003-x87
 ```
 
@@ -309,7 +309,7 @@ requests                      100
 outcomes                      incident_closed:RESOLVED  100
 execution states observed     VERIFIED
 mutations                     0
-generation before / after     79 / 79
+generation before / after     95 / 95
 ```
 
 Control-plane closure refuses first — the incident is `RESOLVED`, so its
@@ -412,26 +412,26 @@ confirmed `HTTP 503`. **No CLI or operator remediation after submission.**
 
 | Field | Value |
 |---|---|
-| Incident | `INC-20260817-1AF3B8` |
-| Trace | `9d2ed889b0c02f43ee797502bb447caa` |
+| Incident | `INC-20260817-AB2113` |
+| Trace | `1657dca48777da5008c6765f05280c9f` |
 | Routing | Gemini 3.7 Flash via ADK → `systems` |
 | Evidence | 12 items, all `TRUSTED_TOOL` |
 | Proposal | `FLIP_TRAFFIC_TO_LAST_GOOD` |
-| Decision | `AUTO_ALLOWED` / `LOW_RISK_TRAFFIC_FLIP`, `DEC-2A75E68170` |
+| Decision | `AUTO_ALLOWED` / `LOW_RISK_TRAFFIC_FLIP`, `DEC-DD79D7971B` |
 | Authorized revision | `dispatch-web-00003-x87` |
-| Execution id | `9490e84ed54b0…` |
-| Authorization fingerprint | `6656963c42132…` |
+| Execution id | `289789c1e09ef…` |
+| Authorization fingerprint | `18765cc008fef…` |
 | Lease epoch | 1, outcome `ACQUIRED` |
 | Observed pre-state | `dispatch-web-00004-jqm` |
-| `resourceVersion` sent | `AAZZM2jtdWU` |
+| `resourceVersion` sent | `AAZZM8OQKvE` |
 | Mutation API | `serving.knative.dev/v1 replaceService` |
 | Verifier | `RECOVERED`, 200, allocation `{00003-x87: 100}`, exclusive `true` |
 | Terminalization | `ADVANCED` → `VERIFIED`, exclusive `true` |
 | **Incident** | **`RESOLVED`** |
-| End to end | 15.4 s |
+| End to end | 17.9 s |
 | Audit records | 15, chain verified |
 
-Infrastructure: `HTTP 503 → HTTP 200`, generation `76 → 77`, revisions `4 → 4`,
+Infrastructure: `HTTP 503 → HTTP 200`, generation `84 → 85`, revisions `4 → 4`,
 `known-good` tag preserved. The run was performed on every build of this gate,
 end to end, with the same result.
 
@@ -443,7 +443,7 @@ end to end, with the same result.
   execution_state  VERIFIED                   x10
   terminal         true                       x10
   mutated          false                      x10
-generation 77 -> 77
+generation 85 -> 85
 live       HTTP 200, dispatch-web-00003-x87
 ```
 
@@ -499,6 +499,51 @@ mutated                     False
 generation before / after   69 / 69
 ```
 
+## Codex hostile review — round 2
+
+The fixed tree was reviewed again, cold, with round 1's findings named so they
+could be checked for genuine closure rather than relabelling. Round 2 confirmed
+Medium 1 and Medium 2 closed, High 1 closed for its original symptom, High 2
+**partially** closed — and returned **FIX FIRST** with three further findings,
+two of them introduced by the round-1 fixes. All three were real and are fixed.
+
+| # | Finding | Fix |
+|---|---|---|
+| High 1 | Reconciliation was not observe-only. An execution already at `MUTATED` could mutate *again* if the service had drifted back to the authorized pre-state — overwriting an operator's deliberate rollback and making one authorization an open-ended licence. | An execution recovered in `MUTATED` whose target is no longer live now refuses with `MUTATION_DID_NOT_HOLD` and mutates nothing. A fresh failure needs a fresh incident and a fresh authorization. It deliberately writes no terminal state: a traffic migration is asynchronous, so an observation taken moments after our own mutation can legitimately still show the old revision, and writing `FAILED` on that basis would be a race rather than a finding. |
+| High 2 | The incident-closure guard was a single read taken before binding, ownership, probing and the Cloud Run read. An incident could close during that window and the in-flight request would still mutate. | The status is re-read immediately before the Cloud Run snapshot, after the ownership fence. A closed incident releases the lease and refuses with `incident_closed_during_execution:<status>`. |
+| Medium 1 | Terminalization accepted `MUTATION_REQUESTED`, which is written *before* the API call, so an execution could be closed as `VERIFIED` on the strength of a healthy service some other actor produced — false attribution. | Reverted to `MUTATED` only. Round 1's symptom is already fixed at its source by the lapsed-lease re-acquisition, and reconciliation converts a half-recorded execution to `MUTATED` by observing the authorized target really is live. |
+
+Neither High is a fully atomic guard, and neither is claimed to be: Firestore
+and the Cloud Run Admin API cannot be committed together, so the closure
+re-read narrows the window to the same width as the ownership fence rather than
+eliminating it. That is the same limitation stated in D3.5, applied to a second
+guard.
+
+### New live proof — an execution that already mutated will not mutate again
+
+Real autonomous run with the verifier unavailable, so the execution sits at
+`MUTATED` and the incident at `REMEDIATION_FAILED`. The operator then undoes the
+remediation, and the same decision is re-delivered after the lease lapses.
+
+```
+incident                      INC-20260817-0DE7C3, REMEDIATION_FAILED
+first mutation                landed, live HTTP 200 on dispatch-web-00003-x87
+operator undoes it            live HTTP 503 on dispatch-web-00004-jqm
+
+re-delivery of the same decision:
+  recovered_state             MUTATED
+  reason                      MUTATION_DID_NOT_HOLD
+  detail                      this execution already mutated; the target is
+                              no longer live
+  observed                    dispatch-web-00004-jqm
+  authorized_target_revision  dispatch-web-00003-x87
+  mutated                     False
+  generation before / after   82 / 82
+  live                        HTTP 503 — the operator's undo stands
+```
+
+The operator's deliberate rollback was **not** overwritten.
+
 ## IAM and Gate D.1 regression (Tests N, O)
 
 Run as the real `sa-executor`. **No IAM was changed in this gate.**
@@ -525,7 +570,7 @@ its own claim.
 
 ## Tests
 
-**Offline: 263 passed, 11 skipped** — including 66 new Gate D.3 contract tests
+**Offline: 268 passed, 11 skipped** — including 71 new Gate D.3 contract tests
 covering epoch issuance, the five-condition compare-and-set, fence ordering
 around the Cloud Run read, the whole replacement-body builder (image, runtime
 identity, environment, ingress, scaling, labels, tag preservation, revision

@@ -568,16 +568,14 @@ def test_a_genuinely_fenced_worker_writes_no_receipt():
     assert "else:" in between
 
 
-def test_terminalization_accepts_an_unrecorded_but_issued_mutation():
+def test_only_a_recorded_mutation_is_terminalizable():
+    """Superseded by the round-2 rule: see test_terminalization_requires_a_recorded_mutation."""
     from scf.app.executor import TERMINALIZABLE_STATES
 
-    assert TERMINALIZABLE_STATES == {
-        ExecutionState.MUTATION_REQUESTED.value,
-        ExecutionState.MUTATED.value,
-    }
     for state in (
         ExecutionState.CLAIMED,
         ExecutionState.PRECONDITION_CHECKED,
+        ExecutionState.MUTATION_REQUESTED,
         ExecutionState.VERIFIED,
         ExecutionState.FAILED,
         ExecutionState.STALE,
@@ -677,3 +675,58 @@ def test_a_closed_incident_refusal_still_reports_the_execution_state():
     assert 'problem.startswith("incident_closed")' in source
     assert "execution_state" in source
     assert "TERMINAL_EXECUTION_STATES" in source
+
+
+# --- Codex review round 2 -----------------------------------------------------
+
+
+def test_terminalization_requires_a_recorded_mutation():
+    """MUTATION_REQUESTED is written BEFORE the API call and proves nothing."""
+    from scf.app.executor import TERMINALIZABLE_STATES
+
+    assert TERMINALIZABLE_STATES == {ExecutionState.MUTATED.value}
+    assert ExecutionState.MUTATION_REQUESTED.value not in TERMINALIZABLE_STATES
+    source = inspect.getsource(__import__("scf.app.executor", fromlist=["terminalize"]).terminalize)
+    assert "expect_states=(ExecutionState.MUTATED,)" in source
+
+
+def test_an_already_mutated_execution_never_mutates_again():
+    """One authorization is not an open-ended licence to keep changing things."""
+    source = inspect.getsource(__import__("scf.app.executor", fromlist=["execute"]).execute)
+    guard_at = source.index("MUTATION_DID_NOT_HOLD")
+    mutate_at = source.index("flip_traffic_to_revision")
+    assert guard_at < mutate_at
+    assert 'current_state == ExecutionState.MUTATED.value' in source
+    # It must not write a terminal state: the traffic migration is async and a
+    # fresh observation can legitimately still show the old revision.
+    guard = source[source.index("if current_state == ExecutionState.MUTATED.value"):guard_at]
+    assert "ExecutionState.FAILED" not in guard
+    assert "store.release" in guard
+
+
+def test_reconciliation_of_a_mutated_execution_is_observe_only():
+    source = inspect.getsource(__import__("scf.app.executor", fromlist=["execute"]).execute)
+    reconcile_at = source.index('observed["active_revision"] == authorized_revision')
+    guard_at = source.index("MUTATION_DID_NOT_HOLD")
+    # Target already live -> reconcile; target not live -> refuse. Neither
+    # branch reaches the mutation.
+    assert reconcile_at < guard_at < source.index("flip_traffic_to_revision")
+
+
+def test_incident_closure_is_rechecked_immediately_before_mutating():
+    """The first read happens before a lot of work; incidents can close mid-flight."""
+    source = inspect.getsource(__import__("scf.app.executor", fromlist=["execute"]).execute)
+    first_at = source.index("_validate(decision, request, incident)")
+    recheck_at = source.index("incident_closed_during_execution")
+    read_at = source.index("read_service_v1")
+    mutate_at = source.index("flip_traffic_to_revision")
+    assert first_at < recheck_at < read_at < mutate_at
+    # And the fence comes first, so a fenced worker does not even get this far.
+    assert source.index("ExecutionState.PRECONDITION_CHECKED") < recheck_at
+
+
+def test_a_closed_incident_mid_flight_gives_the_lease_back():
+    source = inspect.getsource(__import__("scf.app.executor", fromlist=["execute"]).execute)
+    recheck_at = source.index("incident_closed_during_execution")
+    window = source[source.index("latest = await run_in_threadpool"):recheck_at]
+    assert "store.release" in window

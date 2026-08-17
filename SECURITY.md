@@ -131,11 +131,21 @@ Stated plainly rather than implied away.
    re-issued decision cannot become a second infrastructure effect. A
    compromised writer can still author a *materially different* authorization,
    which by definition has a different fingerprint. That remains open.
-9. **Candidate freshness is point-in-time.** The rollback target is re-probed
+9. **Control-plane closure is enforced at the mutating boundary, twice.** The
+   executor refuses any decision whose incident is `RESOLVED` or `ESCALATED`,
+   once before doing any work and again immediately before the Cloud Run
+   snapshot is read. Because the two systems cannot be committed together, that
+   second check narrows the window rather than eliminating it — the same
+   limitation as the ownership fence, stated the same way.
+10. **One authorization is not an open-ended licence.** An execution that has
+    already performed its mutation refuses to perform it again if the target is
+    no longer live: a fresh failure requires a fresh incident and a fresh
+    authorization, so an operator's deliberate rollback is never overwritten.
+11. **Candidate freshness is point-in-time.** The rollback target is re-probed
    through its own tag URL immediately before mutating, and a stale or
    unhealthy candidate produces `TARGET_NO_LONGER_HEALTHY` and no mutation.
    Nothing guarantees the target stays healthy afterwards.
-10. **No capability is claimed before its evidence exists.** The README
+12. **No capability is claimed before its evidence exists.** The README
     integration table is authoritative for what is and is not integrated.
 
 ## Data handling and processing location

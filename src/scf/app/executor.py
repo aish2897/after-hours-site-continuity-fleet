@@ -101,11 +101,15 @@ PRE_MUTATION_STATES = (
     ExecutionState.MUTATED,
 )
 
-#: States a successful verification may close. Both mean the mutation was
-#: issued; only the bookkeeping differs.
-TERMINALIZABLE_STATES = frozenset(
-    {ExecutionState.MUTATION_REQUESTED.value, ExecutionState.MUTATED.value}
-)
+#: The only state a successful verification may close.
+#:
+#: `MUTATION_REQUESTED` is deliberately NOT here. It is written *before* the
+#: Cloud Run call, so it does not prove a mutation was ever issued — accepting
+#: it would let an execution be closed as VERIFIED on the strength of a healthy
+#: service that some other actor produced. Reconciliation is what converts a
+#: half-recorded execution into `MUTATED`, by observing that the authorized
+#: target really is live, and the incident stays reconcilable until it does.
+TERMINALIZABLE_STATES = frozenset({ExecutionState.MUTATED.value})
 
 
 @lru_cache(maxsize=1)
@@ -407,7 +411,9 @@ async def execute(
 
     owner = WORKER_ID
     epoch = int((record or {}).get("lease_epoch") or 0)
+    current_state = (record or {}).get("state")
     base["lease_epoch"] = epoch
+    base["recovered_state"] = current_state
 
     def _advance(state: ExecutionState, **fields: Any) -> tuple[str, dict | None]:
         return store.advance(
@@ -463,6 +469,38 @@ async def execute(
             "state": ExecutionState.MUTATED.value,
             **base,
         }
+
+    if current_state == ExecutionState.MUTATED.value:
+        # This execution already performed its one authorized mutation, and the
+        # authorized target is no longer live. Something undid it — an operator
+        # rollback, a competing deploy, a fresh failure. Re-applying would make
+        # one authorization an open-ended licence to keep changing
+        # infrastructure, so it is refused: a new failure needs a new incident
+        # and a new authorization.
+        #
+        # Nothing is terminalized here. A Cloud Run traffic migration is
+        # asynchronous, so an observation taken moments after our own mutation
+        # can still show the old revision; writing a terminal FAILED on that
+        # basis would be a race, not a finding. The execution stays recoverable
+        # and reconciliation settles it.
+        await run_in_threadpool(
+            store.release, execution_id, owner=owner, lease_epoch=epoch
+        )
+        log_event(
+            "execution_mutation_did_not_hold",
+            severity="WARNING",
+            trace_id=trace_id,
+            incident_id=request.incident_id,
+            execution_id=execution_id,
+            authorized_target_revision=authorized_revision,
+            observed_active_revision=observed["active_revision"],
+        )
+        return _refuse(
+            "MUTATION_DID_NOT_HOLD",
+            detail="this execution already mutated; the target is no longer live",
+            observed=observed["active_revision"],
+            **base,
+        )
 
     if expected_source and observed["active_revision"] != expected_source:
         # CASE C: infrastructure is neither the authorized pre-state nor the
@@ -538,6 +576,29 @@ async def execute(
     )
     if result != ADVANCED:
         return _fenced(result, "precondition")
+
+    # Control-plane closure, re-read at the last moment. The first check
+    # happened before any of the work above, and an incident can be closed
+    # while a request is in flight. Firestore and Cloud Run cannot be committed
+    # together, so this narrows the window to the same width as the ownership
+    # fence rather than eliminating it — the same honest limitation, stated the
+    # same way.
+    latest = await run_in_threadpool(repo.get, request.incident_id)
+    if latest.get("status") in {s.value for s in CLOSED_INCIDENT_STATES}:
+        await run_in_threadpool(
+            store.release, execution_id, owner=owner, lease_epoch=epoch
+        )
+        log_event(
+            "execution_incident_closed_mid_flight",
+            severity="WARNING",
+            trace_id=trace_id,
+            incident_id=request.incident_id,
+            execution_id=execution_id,
+            status=latest.get("status"),
+        )
+        return _refuse(
+            f"incident_closed_during_execution:{latest.get('status')}", **base
+        )
 
     snapshot = await run_in_threadpool(read_service_v1, target_ref)
     base["resource_version_sent"] = resource_version_of(snapshot)
@@ -783,7 +844,7 @@ async def terminalize(
         store.terminalize,
         execution_id,
         ExecutionState.VERIFIED,
-        expect_states=(ExecutionState.MUTATION_REQUESTED, ExecutionState.MUTATED),
+        expect_states=(ExecutionState.MUTATED,),
         verified_at=utc_now(),
         verified_traffic_allocation=allocation,
         verified_http_status=status_code,

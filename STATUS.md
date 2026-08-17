@@ -63,6 +63,8 @@ Real execution proof exists in `docs/evidence/`.
   RESOLVED or ESCALATED incident is refused with no infrastructure effect**
 - **An unreachable executor or verifier leaves the incident reconcilable rather
   than falsely closed; reconciliation completes it with exactly one effect**
+- **Reconciliation is observe-only: an execution that already mutated refuses to
+  mutate again, so an operator's deliberate rollback is never overwritten**
 
 ## IN PROGRESS
 
@@ -98,6 +100,10 @@ Nothing. Gate D.3 is closed.
 - The authorization fingerprint stops an equivalent re-issued decision, not a
   materially different forged one. Full control-plane compromise is not covered.
 - Candidate health is a point-in-time precondition, not a future guarantee.
+- Control-plane closure is re-checked immediately before the mutation, but
+  Firestore and the Cloud Run Admin API cannot be committed together, so that
+  window is narrowed rather than eliminated — the same limitation as the
+  ownership fence.
 - No prompt-injection resistance is claimed. Model Armor is not integrated.
 - No Cloud Trace spans exist.
 
