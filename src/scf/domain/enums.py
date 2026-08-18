@@ -86,6 +86,11 @@ class ActionState(StrEnum):
     EXECUTING = "EXECUTING"
     SUCCEEDED = "SUCCEEDED"
     FAILED = "FAILED"
+    #: Issued, and the platform answered with something that is proof neither
+    #: way. Distinct from FAILED on purpose: recording a failure nobody
+    #: observed is the same overclaim at the action level that terminal FAILED
+    #: was at the execution level.
+    OUTCOME_UNKNOWN = "OUTCOME_UNKNOWN"
     DUPLICATE_SUPPRESSED = "DUPLICATE_SUPPRESSED"
 
 

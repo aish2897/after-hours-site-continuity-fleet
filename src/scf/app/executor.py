@@ -717,7 +717,7 @@ async def execute(
             **base,
         )
 
-    action.state = ActionState.SUCCEEDED if accepted else ActionState.FAILED
+    action.state = ActionState.SUCCEEDED if accepted else ActionState.OUTCOME_UNKNOWN
     action.result = mutation
     action.error = None if accepted else str(mutation.get("error"))[:400]
     action.finished_at = utc_now()

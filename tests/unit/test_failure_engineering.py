@@ -1687,3 +1687,79 @@ def test_terminalization_is_evidence_gated_and_said_to_be():
         text = " ".join((root / name).read_text(encoding="utf-8").lower().split())
         assert "renew, or terminalize" not in text, name
         assert "renew, cannot terminalize" not in text, name
+
+
+# --- Self-audit in place of Codex round 12 -----------------------------------
+# Codex hit a hard usage limit (resets 2026-08-21). These are the checks round
+# 12 was asked to make against the EXECUTION_OUTCOME_UNKNOWN path. Recorded as
+# a self-audit, NOT as an independent review: the whole point of the loop is
+# that the reviewer is not the author, and that property is missing here.
+
+
+def test_an_unknown_outcome_cannot_become_a_second_infrastructure_effect():
+    """MUTATION_REQUESTED counts as attempted, so re-execution refuses."""
+    from scf.app.executor import ATTEMPTED_STATES, TERMINALIZABLE_STATES
+    from scf.domain.enums import ExecutionState
+
+    # Left where an unknown outcome leaves it...
+    assert ExecutionState.MUTATION_REQUESTED.value in ATTEMPTED_STATES
+    # ...so reconciliation refuses to re-fire it when the target is not live,
+    # and cannot close it as VERIFIED when it is not proven.
+    assert ExecutionState.MUTATION_REQUESTED.value not in TERMINALIZABLE_STATES
+    assert TERMINALIZABLE_STATES == {ExecutionState.MUTATED.value}
+
+
+def test_an_unknown_outcome_leaves_a_route_to_closure():
+    """Reconcilable, and the incident rests somewhere reconciliation accepts."""
+    from scf.app.main import RECONCILABLE_STATES
+    from scf.domain.failures import FailureCategory, handling
+
+    rule = handling(FailureCategory.EXECUTION_OUTCOME_UNKNOWN)
+    assert rule.reconcilable is True
+    assert rule.resting_status in RECONCILABLE_STATES, (
+        "an unknown outcome must rest where reconciliation can pick it up"
+    )
+    # And the only way from there to MUTATED is observing the target live.
+    from scf.app.executor import PRE_MUTATION_STATES
+    from scf.domain.enums import ExecutionState
+
+    assert ExecutionState.MUTATION_REQUESTED in PRE_MUTATION_STATES
+
+
+def test_an_unknown_outcome_is_not_recorded_as_a_failed_action():
+    """The action record must not assert a failure nobody observed either."""
+    from scf.app import executor
+    from scf.domain.enums import ActionState
+
+    source = inspect.getsource(executor.execute)
+    assert "ActionState.OUTCOME_UNKNOWN" in source
+    assert "ActionState.FAILED" not in source
+    assert ActionState.OUTCOME_UNKNOWN != ActionState.FAILED
+
+
+def test_the_unknown_outcome_receipt_reads_as_no_progress():
+    """The orchestrator must not treat a refusal as a landed mutation."""
+    from scf.app.main import ExecutionReceipt, _execution_already_landed
+
+    receipt = {
+        "executed": False,
+        "mutated": False,
+        "refused": True,
+        "reason": "MUTATION_OUTCOME_UNKNOWN",
+        "retryable": False,
+        "state": "MUTATION_REQUESTED",
+    }
+    reported = ExecutionReceipt.model_validate(receipt)
+    assert reported.progressed() is False
+    assert _execution_already_landed(receipt) is False
+
+
+def test_no_gate_e_category_is_both_reconcilable_and_terminal():
+    """A reconcilable failure that rests in a terminal state is unreachable."""
+    from scf.domain.failures import FailureCategory, handling
+    from scf.domain.state_machine import TERMINAL_STATES
+
+    for category in FailureCategory:
+        rule = handling(category)
+        if rule.reconcilable:
+            assert rule.resting_status not in TERMINAL_STATES, category

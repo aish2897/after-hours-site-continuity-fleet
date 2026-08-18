@@ -546,7 +546,7 @@ all four services            healthy, fault_mode: null
 
 ## Tests
 
-**Offline: 436 passed, 11 skipped** — including 156 Gate E contract tests
+**Offline: 441 passed, 11 skipped** — including 161 Gate E contract tests
 covering fault-injection isolation, malformed model output at the parser,
 dangerous and unknown actions, call bounds, budget exhaustion, doing nothing,
 authenticated-but-invalid worker payloads, retry budgets, escalation-package
@@ -560,6 +560,41 @@ infrastructure, while the malformed model output, the dangerous and unknown
 actions, the runaway loop and the malformed worker payload are controlled
 payloads driven through the real parser, the real gate and the real caller.
 Both kinds are real runs; only the first kind is evidence about the platform.
+
+---
+
+## Hostile review status
+
+Eleven rounds of adversarial review were run by Codex (GPT-5), read-only,
+against the committed HEAD each time, over the sixteen attack axes. Every
+Critical and High it raised was fixed and the fix re-reviewed in the following
+round.
+
+**Round 12 did not run.** Codex hit a hard account usage limit that does not
+reset until 2026-08-21. The checks round 12 was asked to make against the newest
+code — the `EXECUTION_OUTCOME_UNKNOWN` path — were instead written as contract
+tests by the author and are marked as such in
+`tests/unit/test_failure_engineering.py`. That is not equivalent: the value of
+the loop is that the reviewer is not the author, and that property is missing
+for the round-11 fixes. **The loop therefore has one unverified round
+outstanding**, and this is stated rather than presented as convergence.
+
+What the loop actually found is worth recording, because it is the argument for
+having run it:
+
+| Round | Raised | Notable |
+|---|---|---|
+| 1–7 | Critical 0 | Non-dict JSON stranding incidents; truthy-flag terminalization; `"healthy" in body` inversion |
+| 8 | 2 High | `1 == True` satisfied three required booleans at the policy gate |
+| 9 | 1 High | The round-8 fix was incomplete — the contradiction check next to it still used `!=` |
+| 10 | 3 High | A repeated JSON key discarded a worker's own refusal; the round-9 negation fix read an indexed failure as healthy |
+| 11 | 2 High | Only a 409 proves a mutation did not land; a stale owner "cannot terminalize" was never true |
+
+Rounds 9, 10 and 11 each found a defect in the **previous round's fix**, not in
+the original code. Three of the last four Highs were introduced by a fix for an
+earlier High. That is the strongest available argument that a single review pass
+would not have been enough, and it is also why the missing round 12 is reported
+as a gap rather than rounded down.
 
 ---
 
