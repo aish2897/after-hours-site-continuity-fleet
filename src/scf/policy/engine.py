@@ -37,10 +37,24 @@ def trusted_evidence_conflicts(evidence: Iterable[Evidence]) -> set[str]:
     for item in evidence:
         if item.trust_level is not TrustLevel.TRUSTED_TOOL:
             continue
-        if item.key in seen and seen[item.key] != item.value:
+        if item.key in seen and not _same_value(seen[item.key], item.value):
             conflicts.add(item.key)
         seen[item.key] = item.value
     return conflicts
+
+
+def _same_value(left: Any, right: Any) -> bool:
+    """Whether two trusted facts are genuinely the same assertion.
+
+    Type-aware, because `bool` is a subclass of `int`: plain equality says `1`
+    and `True` agree, so a contradiction check written with `!=` silently
+    passed the exact case it existed to catch — evidence of `1` followed by
+    evidence of `True`, where last-write-wins then leaves the boolean in the
+    snapshot and the gate authorizes.
+    """
+    if isinstance(left, bool) != isinstance(right, bool):
+        return False
+    return left == right
 
 
 def _satisfies(actual: Any, expected: Any) -> bool:

@@ -518,6 +518,17 @@ def _observe_service_state(outcome: dict[str, Any]) -> dict[str, Any]:
             "restored": restored,
         }
 
+    healthy = outcome.get("service_observed_healthy")
+    if isinstance(healthy, bool):
+        return {
+            "state": (
+                "the dispatch service is responding normally"
+                if healthy
+                else "the dispatch service is still not responding normally"
+            ),
+            "restored": healthy,
+        }
+
     status = outcome.get("service_http_status")
     if status == 200:
         return {"state": "the dispatch service is responding normally", "restored": True}
@@ -636,9 +647,16 @@ async def _run_remediation(
     outcome["evidence_keys"] = [item.key for item in evidence]
     # Recorded here so a later failure can tell the manager what the service
     # was actually doing, using evidence gathered by an authorized identity.
-    observed_status = trusted_evidence_map(evidence).get("http_status")
+    observed = trusted_evidence_map(evidence)
+    observed_status = observed.get("http_status")
     if isinstance(observed_status, int):
         outcome["service_http_status"] = observed_status
+    # The status code is not the verdict. A service can answer 200 with a body
+    # that says it is unhealthy, and the investigator's health reader is what
+    # settles that — reporting "responding normally" off the bare 200 would
+    # tell the manager the opposite of what the trusted evidence said.
+    if isinstance(observed.get("service_unhealthy"), bool):
+        outcome["service_observed_healthy"] = observed["service_unhealthy"] is False
 
     if envelope.proposal is None:
         # Doing nothing is a legitimate outcome. The system is not obliged to

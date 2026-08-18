@@ -1469,3 +1469,87 @@ def test_the_probe_reads_in_bounded_chunks():
     source = _stripped_source(cloud_run_evidence.probe_health)
     assert "chunk_size=READ_CHUNK_BYTES" in source
     assert cloud_run_evidence.READ_CHUNK_BYTES <= cloud_run_evidence.MAX_HEALTH_BODY_BYTES
+
+
+# --- Codex Gate E audit, round 9 ---------------------------------------------
+
+
+def test_mixed_numeric_and_boolean_evidence_is_a_contradiction():
+    """`bool` subclasses `int`, so `1 != True` is False — and the check missed it."""
+    from scf.domain.enums import Decision
+    from scf.policy import evaluate
+    from scf.policy.engine import trusted_evidence_conflicts
+
+    def ev(key, value):
+        return Evidence(key=key, value=value, supports="t", source_agent="systems",
+                        trust_level=TrustLevel.TRUSTED_TOOL)
+
+    proposal = Proposal(
+        action_type=ActionType.FLIP_TRAFFIC_TO_LAST_GOOD,
+        target_ref="dispatch-web",
+        confidence=0.9,
+        rationale="t",
+        proposed_by="agent:systems",
+    )
+    mixed = [
+        ev("service_unhealthy", 1),
+        ev("service_unhealthy", True),
+        ev("candidate_revision_approved", True),
+        ev("candidate_probe_healthy", True),
+    ]
+    assert trusted_evidence_conflicts(mixed) == {"service_unhealthy"}
+    decision = evaluate(proposal, mixed)
+    assert decision.decision is Decision.DENIED
+    assert decision.reason_code == "CONTRADICTORY_EVIDENCE"
+
+    # Genuinely identical repeats are not a contradiction.
+    repeated = [ev("service_unhealthy", True), ev("service_unhealthy", True),
+                ev("candidate_revision_approved", True),
+                ev("candidate_probe_healthy", True)]
+    assert trusted_evidence_conflicts(repeated) == set()
+    assert evaluate(proposal, repeated).decision is Decision.AUTO_ALLOWED
+
+
+def test_a_duplicate_health_key_that_changes_type_is_a_contradiction():
+    from scf.tools.cloud_run_evidence import body_is_healthy
+
+    assert body_is_healthy('{"healthy": 1, "healthy": true}') is False
+    assert body_is_healthy('{"healthy": true, "healthy": 1}') is False
+    assert body_is_healthy('{"healthy": false, "healthy": true}') is False
+    # An honest repeat is still fine.
+    assert body_is_healthy('{"healthy": true, "healthy": true}') is True
+
+
+def test_a_negated_failure_word_is_not_a_failure_report():
+    """A false negative here blocks recovery verification for a healthy service."""
+    from scf.tools.cloud_run_evidence import body_is_healthy
+
+    for body in (
+        '{"status":"UP","details":{"database":"UP"},"message":"no failure detected"}',
+        '{"status":"UP","note":"never failed"}',
+        '{"status":"UP","note":"0 failures"}',
+        '{"status":"UP","note":"zero failures since restart"}',
+    ):
+        assert body_is_healthy(body) is True, body
+
+    # Negating a *positive* marker still reads as a failure, and an
+    # un-negated failure word still vetoes.
+    assert body_is_healthy("service is not healthy") is False
+    assert body_is_healthy('{"status":"UP","note":"failed"}') is False
+    assert body_is_healthy('{"status":"UP","note":"no restarts, db failed"}') is False
+
+
+def test_the_handover_reports_the_health_verdict_not_the_status_code():
+    """200 with a body saying otherwise is not "responding normally"."""
+    from scf.app import main
+
+    assert main._observe_service_state(
+        {"service_http_status": 200, "service_observed_healthy": False}
+    )["restored"] is False
+    assert main._observe_service_state(
+        {"service_http_status": 200, "service_observed_healthy": True}
+    )["restored"] is True
+    # A validated verifier verdict still outranks the investigator's snapshot.
+    assert main._observe_service_state(
+        {"service_observed_healthy": True, "verification_checked": {"recovered": False}}
+    )["restored"] is False

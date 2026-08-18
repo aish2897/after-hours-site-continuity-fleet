@@ -105,6 +105,17 @@ _UNHEALTHY_WORDS = frozenset(
 #: Phrases that negate a positive marker and cannot be caught word-by-word.
 _UNHEALTHY_PHRASES = ("not healthy", "not ok", "not ready", "not serving")
 
+#: A negated failure word is not a failure report. `"message": "no failure
+#: detected"` is a service saying it is fine, and reading it as a failure
+#: blocks candidate freshness, recovery verification and terminalization for a
+#: service that is genuinely healthy — a false negative in the one place where
+#: failing closed does real damage. Negators are matched only against failure
+#: words, so `not healthy` above is untouched.
+_NEGATED_FAILURE = re.compile(
+    "(?<![a-z])(?:no|not|zero|never|without|0)[^a-z0-9]+"
+    "(?:" + "|".join(sorted(_UNHEALTHY_WORDS, key=len, reverse=True)) + ")s?(?![a-z])"
+)
+
 
 #: Keys a JSON health body might answer with. Checked in order.
 _HEALTH_KEYS = ("healthy", "ok", "ready", "serving", "status", "state")
@@ -116,12 +127,25 @@ _HEALTH_KEYS = ("healthy", "ok", "ready", "serving", "status", "state")
 _CONFLICT_KEY = "__scf_conflicting_health_keys__"
 
 
+def _same_value(left: Any, right: Any) -> bool:
+    """Whether two JSON values are the same assertion, not merely equal.
+
+    `bool` is a subclass of `int`, so `1 == True`. A duplicate-key check
+    written with `!=` therefore missed `{"healthy": 1, "healthy": true}`
+    entirely — the parser kept the boolean, and a body that could not decide
+    what type its own health verdict was got read as healthy.
+    """
+    if isinstance(left, bool) != isinstance(right, bool):
+        return False
+    return left == right
+
+
 def _object_pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     """Build a dict while remembering keys that disagreed with themselves."""
     result: dict[str, Any] = {}
     conflicts: list[str] = []
     for key, value in pairs:
-        if key in result and result[key] != value:
+        if key in result and not _same_value(result[key], value):
             conflicts.append(key)
         result[key] = value
     if conflicts:
@@ -187,7 +211,7 @@ def _text_says_unhealthy(text: str) -> bool:
     """Whether a plain string reports a failure, as whole words and phrases."""
     if any(phrase in text for phrase in _UNHEALTHY_PHRASES):
         return True
-    return bool(set(re.findall(r"[a-z]+", text)) & _UNHEALTHY_WORDS)
+    return bool(set(re.findall(r"[a-z]+", _NEGATED_FAILURE.sub(" ", text))) & _UNHEALTHY_WORDS)
 
 
 def _text_is_healthy(text: str) -> bool:
@@ -196,7 +220,7 @@ def _text_is_healthy(text: str) -> bool:
         return False
     if any(phrase in text for phrase in _UNHEALTHY_PHRASES):
         return False
-    words = set(re.findall(r"[a-z]+", text))
+    words = set(re.findall(r"[a-z]+", _NEGATED_FAILURE.sub(" ", text)))
     if words & _UNHEALTHY_WORDS:
         return False
     return bool(words & _HEALTHY_MARKERS)
