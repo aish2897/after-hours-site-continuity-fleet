@@ -340,10 +340,39 @@ def test_the_orchestrator_treats_budget_exhaustion_as_a_failure():
     from scf.app import main
 
     source = inspect.getsource(main._run_remediation)
-    assert 'body.get("budget_exceeded")' in source
+    assert "envelope.budget_exceeded" in source
     assert source.index("budget_exceeded") < source.index("Evidence.model_validate")
     rule = handling(FailureCategory.WORKER_BUDGET_EXCEEDED)
     assert not rule.retry_eligible
+
+
+def test_budget_exhaustion_is_a_boolean_claim_not_a_truthy_string():
+    """`"false"` is a non-empty string. It must not exhaust a live investigation."""
+    from scf.app.main import InvestigatorEnvelope
+
+    with pytest.raises(ValidationError):
+        InvestigatorEnvelope.model_validate({"evidence": [], "budget_exceeded": "false"})
+    with pytest.raises(ValidationError):
+        InvestigatorEnvelope.model_validate({"evidence": [], "budget_exceeded": 1})
+    assert InvestigatorEnvelope.model_validate({"evidence": []}).budget_exceeded is False
+
+
+def test_an_empty_proposal_is_malformed_output_not_a_decision_not_to_act():
+    """`{}` is falsy but it is not the same statement as `null`."""
+    from scf.app.main import InvestigatorEnvelope
+
+    absent = InvestigatorEnvelope.model_validate({"evidence": [], "proposal": None})
+    empty = InvestigatorEnvelope.model_validate({"evidence": [], "proposal": {}})
+    assert absent.proposal is None, "no proposal means no remediation is warranted"
+    assert empty.proposal == {}, "an empty proposal must reach the contract check"
+    with pytest.raises(ValidationError):
+        Proposal.model_validate(empty.proposal)
+
+
+def test_a_missing_evidence_field_is_a_contract_violation():
+    from scf.app.main import InvestigatorEnvelope
+
+    assert InvestigatorEnvelope.model_validate({}).evidence is None
 
 
 # --- E5 the system must be capable of doing nothing --------------------------
@@ -1206,3 +1235,96 @@ def test_no_evidence_artifact_still_claims_a_classification_boundary():
         text = " ".join(path.read_text(encoding="utf-8").lower().split())
         if "classification and security boundary governs" in text:
             assert "corrected after gate e" in text, path.name
+
+
+# --- Codex Gate E audit, round 7 ---------------------------------------------
+
+
+def _stripped_source(obj) -> str:
+    """Source with docstrings removed — assert against what runs, not the prose."""
+    import ast
+    import textwrap
+
+    tree = ast.parse(textwrap.dedent(inspect.getsource(obj)))
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef,
+                             ast.ClassDef)) and ast.get_docstring(node):
+            node.body = node.body[1:]
+    return ast.unparse(tree)
+
+
+
+def test_a_health_key_answering_with_an_empty_container_is_not_health():
+    """`{"healthy": {}}` asserts nothing — and must not fall back to the key name.
+
+    With no structural verdict at all the reader dropped through to word
+    matching, which sees the word *healthy* in the key and returns True. That
+    inversion could carry a bad revision all the way to RECOVERED / RESOLVED.
+    """
+    from scf.tools.cloud_run_evidence import body_is_healthy
+
+    for body in (
+        '{"healthy": {}}',
+        '{"ok": []}',
+        '{"status": {}}',
+        '{"serving": [{"note": "no verdict here"}]}',
+        '{"ready": {"detail": {"note": "still nothing"}}}',
+    ):
+        assert body_is_healthy(body) is False, body
+
+    # A container that *does* carry a recognised verdict is still read normally.
+    # `{"status": {"db": "ok"}}` is deliberately NOT such a case: `db` is not a
+    # health key, so nothing in that body actually answers the question.
+    assert body_is_healthy('{"status": {"db": "ok"}}') is False
+    assert body_is_healthy('{"status": {"db": {"state": "ok"}}}') is True
+    assert body_is_healthy('{"status": [{"state": "ok"}]}') is True
+    assert body_is_healthy('{"status": [{"state": "failed"}]}') is False
+
+
+def test_real_health_vocabularies_are_not_read_as_failures():
+    """Spring Boot answers UP; the IETF health-check draft answers pass.
+
+    Reading those as unhealthy fails closed in the worst place: it blocks a
+    genuine recovery from ever being verified.
+    """
+    from scf.tools.cloud_run_evidence import body_is_healthy
+
+    for body in (
+        '{"status": "UP"}',
+        '{"status": "pass"}',
+        '{"status": "UP", "checks": [{"status": "UP"}]}',
+        '{"components": {"db": {"status": "UP"}}, "status": "UP"}',
+        "service available",
+    ):
+        assert body_is_healthy(body) is True, body
+
+    # The counterpart word still disqualifies, wherever the verdict sits.
+    assert body_is_healthy('{"status": "pass", "db": {"status": "fail"}}') is False
+    assert body_is_healthy('{"status": "fail"}') is False
+    assert body_is_healthy("health check fail") is False
+    assert body_is_healthy('{"status": "DOWN"}') is False
+
+
+def test_the_probe_bounds_the_read_before_buffering_it():
+    """`response.text` materialises the whole body before anything rejects it."""
+    from scf.tools import cloud_run_evidence
+
+    # Against the code that runs, not the prose that explains it: the docstring
+    # names `response.text` precisely to say why it is not used.
+    source = _stripped_source(cloud_run_evidence.probe_health)
+    assert "httpx.stream" in source, "the body must be read incrementally"
+    assert "response.text" not in source
+    assert "MAX_HEALTH_BODY_BYTES" in source, "the bound applies during the read"
+
+    # And the size check happens before the body is normalised or copied.
+    reader = _stripped_source(cloud_run_evidence.body_is_healthy)
+    assert reader.index("MAX_HEALTH_BODY_BYTES") < reader.index("body.strip().lower()")
+
+
+def test_a_truncated_health_body_is_not_read_as_an_answer():
+    """One byte past the bound is kept so the truncation stays visible."""
+    from scf.tools.cloud_run_evidence import MAX_HEALTH_BODY_BYTES, body_is_healthy
+
+    truncated = '{"healthy": true, "pad": "' + "x" * MAX_HEALTH_BODY_BYTES
+    assert len(truncated) > MAX_HEALTH_BODY_BYTES
+    assert body_is_healthy(truncated) is False

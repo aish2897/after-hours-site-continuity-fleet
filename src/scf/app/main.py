@@ -597,14 +597,27 @@ async def _run_remediation(
     # A 200 from an authenticated caller is not a reason to trust the payload.
     # Authentication says who is speaking; the contract says whether what they
     # said is usable. Both are required.
-    if body.get("budget_exceeded"):
+    try:
+        envelope = InvestigatorEnvelope.model_validate(body)
+    except ValidationError as exc:
+        raise WorkflowFailure(
+            FailureCategory.WORKER_CONTRACT_INVALID,
+            "investigator envelope rejected: not the declared shape",
+        ) from exc
+
+    if envelope.budget_exceeded:
         raise WorkflowFailure(
             FailureCategory.WORKER_BUDGET_EXCEEDED,
-            f"investigator exhausted {body.get('limit')}",
-            tool_calls=body.get("tool_calls"),
+            f"investigator exhausted {envelope.limit}",
+            tool_calls=envelope.tool_calls,
+        )
+    if envelope.evidence is None:
+        raise WorkflowFailure(
+            FailureCategory.WORKER_CONTRACT_INVALID,
+            "investigator returned no evidence field",
         )
     try:
-        evidence = [Evidence.model_validate(item) for item in body["evidence"]]
+        evidence = [Evidence.model_validate(item) for item in envelope.evidence]
     except (ValidationError, KeyError, TypeError) as exc:
         raise WorkflowFailure(
             FailureCategory.WORKER_CONTRACT_INVALID,
@@ -620,23 +633,25 @@ async def _run_remediation(
     if isinstance(observed_status, int):
         outcome["service_http_status"] = observed_status
 
-    if not body.get("proposal"):
+    if envelope.proposal is None:
         # Doing nothing is a legitimate outcome. The system is not obliged to
-        # change infrastructure just because it was asked to look.
+        # change infrastructure just because it was asked to look. An *absent*
+        # proposal says that; an empty or malformed one says something else
+        # entirely, and falls through to the contract check below.
         raise WorkflowFailure(
             FailureCategory.INSUFFICIENT_EVIDENCE,
             "no remediation is warranted by the trusted evidence",
         )
 
     try:
-        proposal = Proposal.model_validate(body["proposal"])
+        proposal = Proposal.model_validate(envelope.proposal)
     except ValidationError as exc:
         # An action outside the closed enum never becomes a domain object, so
         # it cannot reach the gate, let alone the executor.
         raise WorkflowFailure(
             FailureCategory.WORKER_CONTRACT_INVALID,
             "proposal is not a member of the closed action contract",
-            rejected_action=str((body.get("proposal") or {}).get("action_type"))[:64],
+            rejected_action=str(envelope.proposal.get("action_type"))[:64],
         ) from exc
     outcome["proposal"] = proposal.action_type.value
     await run_in_threadpool(
@@ -974,6 +989,33 @@ async def _verify_and_close(
     )
     outcome["final_status"] = IncidentStatus.RESOLVED.value
     return outcome
+
+
+class InvestigatorEnvelope(BaseModel):
+    """The investigator's answer, as a contract rather than raw `.get()`.
+
+    Authentication says who is speaking. It does not say that what they said
+    means what it appears to mean. Two concrete confusions this closes:
+
+    * `{"budget_exceeded": "false"}` is a truthy string. Read with `.get()` a
+      complete, usable investigation would have been thrown away as budget
+      exhaustion, and the incident escalated with evidence sitting unused.
+    * `{"proposal": {}}` is falsy. Read with `.get()` a malformed proposal
+      would have been reported to the manager as "nothing to do here" — a
+      contract violation described as a considered decision not to act.
+
+    `evidence` and `proposal` stay loosely typed here on purpose: this envelope
+    settles *presence and shape*, and `Evidence` / `Proposal` remain the
+    authorities on their own contents, each rejecting into its own category.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    evidence: list[Any] | None = None
+    proposal: dict[str, Any] | None = None
+    budget_exceeded: StrictBool = False
+    limit: str | None = None
+    tool_calls: int | None = None
 
 
 class ExecutionReceipt(BaseModel):

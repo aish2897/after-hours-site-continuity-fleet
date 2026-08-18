@@ -85,13 +85,22 @@ def serves_exclusively(described: dict[str, Any], revision: str) -> bool:
 
 
 #: Bodies that assert health. Matched as whole words against a bounded read.
-_HEALTHY_MARKERS = frozenset({"healthy", "ok", "ready", "serving"})
+#: `up` and `pass` are the vocabularies real health endpoints actually use —
+#: Spring Boot Actuator answers `{"status":"UP"}` and the IETF health-check
+#: draft answers `{"status":"pass"}`. Omitting them did not fail closed in a
+#: useful direction: it made a recovered service unverifiable, which blocks the
+#: recovery from ever being confirmed.
+_HEALTHY_MARKERS = frozenset(
+    {"healthy", "ok", "ready", "serving", "up", "pass", "passing", "available"}
+)
 #: Whole words that disqualify a body outright. Matched as words, not raw
 #: substrings: `errorCount` and `no errors detected` are not failure reports,
-#: and rejecting them would make a healthy service look broken.
+#: and rejecting them would make a healthy service look broken. `fail` is the
+#: counterpart of `pass`; without it `{"status":"pass","db":"fail"}` would have
+#: read as healthy on the strength of one word.
 _UNHEALTHY_WORDS = frozenset(
     {"unhealthy", "unavailable", "degraded", "failing", "failed", "failure",
-     "down", "false"}
+     "fail", "down", "false"}
 )
 #: Phrases that negate a positive marker and cannot be caught word-by-word.
 _UNHEALTHY_PHRASES = ("not healthy", "not ok", "not ready", "not serving")
@@ -140,16 +149,25 @@ def _collect_health_verdicts(payload: Any, depth: int = 0) -> list[bool]:
         for key, value in payload.items():
             if key == _CONFLICT_KEY:
                 continue
+            nested = _collect_health_verdicts(value, depth + 1)
             if key in _HEALTH_KEYS:
                 if isinstance(value, bool):
                     verdicts.append(value)
                 elif isinstance(value, str):
                     verdicts.append(_text_is_healthy(value.strip().lower()))
-                elif not isinstance(value, (dict, list)):
+                elif isinstance(value, (dict, list)):
+                    # A health key whose container answers nothing — `{"ok": []}`,
+                    # `{"healthy": {}}` — is not an assertion of health. Letting
+                    # it contribute no verdict was worse than silent: with no
+                    # verdicts at all the reader fell back to word matching, saw
+                    # the *key name* `healthy`, and called the service healthy.
+                    if not nested:
+                        verdicts.append(False)
+                else:
                     # A non-boolean, non-string health value asserts nothing,
                     # and guessing at it would be exactly the wrong instinct.
                     verdicts.append(False)
-            verdicts.extend(_collect_health_verdicts(value, depth + 1))
+            verdicts.extend(nested)
     elif isinstance(payload, list):
         for item in payload:
             verdicts.extend(_collect_health_verdicts(item, depth + 1))
@@ -183,12 +201,14 @@ def body_is_healthy(body: str) -> bool:
     Anything that does not parse as a JSON object falls back to word matching,
     where negatives are whole words and negating phrases are matched literally.
     """
+    if len(body) > MAX_HEALTH_BODY_BYTES:
+        # A body this size is not a health answer. Refusing it fails closed,
+        # and refusing it *first* means an oversized body is never normalised,
+        # copied or parsed — the work is what made it a denial-of-service
+        # surface, not the decision at the end of it.
+        return False
     text = body.strip().lower()
     if not text:
-        return False
-    if len(text) > MAX_HEALTH_BODY_BYTES:
-        # A body this size is not a health answer. Reading it is a denial-of
-        # -service surface, and refusing it fails closed.
         return False
 
     try:
@@ -224,9 +244,29 @@ def probe(url: str) -> tuple[int, bool, str]:
 
 
 def probe_health(url: str) -> tuple[int, str]:
+    """Read a health body under a hard byte bound.
+
+    Streamed and stopped at the bound rather than buffered whole and measured
+    afterwards. A probe target may be failing in exactly the way we are trying
+    to detect, including by answering with an unbounded body; `response.text`
+    would have materialised all of it into the investigator's memory before
+    anything got the chance to reject it.
+
+    One byte past the bound is kept deliberately: it is what makes the
+    truncation visible to `body_is_healthy`, which then fails closed instead of
+    reading a fragment as if it were the whole answer.
+    """
     try:
-        response = httpx.get(url, timeout=10.0, follow_redirects=True)
-        return response.status_code, response.text.strip()
+        with httpx.stream("GET", url, timeout=10.0, follow_redirects=True) as response:
+            chunks: list[bytes] = []
+            read = 0
+            for chunk in response.iter_bytes():
+                chunks.append(chunk)
+                read += len(chunk)
+                if read > MAX_HEALTH_BODY_BYTES:
+                    break
+            raw = b"".join(chunks)[: MAX_HEALTH_BODY_BYTES + 1]
+            return response.status_code, raw.decode("utf-8", "replace").strip()
     except httpx.HTTPError as exc:
         return 0, f"unreachable: {type(exc).__name__}"
 
