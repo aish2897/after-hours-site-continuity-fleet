@@ -23,6 +23,41 @@ def trusted_evidence_map(evidence: Iterable[Evidence]) -> dict[str, Any]:
     }
 
 
+def trusted_evidence_conflicts(evidence: Iterable[Evidence]) -> set[str]:
+    """Trusted keys asserted more than once with different values.
+
+    Collapsing evidence to a map is last-write-wins, and last-write-wins is not
+    a reading of a contradiction — it is a coin toss with the safety property.
+    Two trusted facts saying `service_unhealthy` is both False and True do not
+    average out to an authorization; they mean the evidence cannot be relied on
+    at all, and the gate must say so.
+    """
+    seen: dict[str, Any] = {}
+    conflicts: set[str] = set()
+    for item in evidence:
+        if item.trust_level is not TrustLevel.TRUSTED_TOOL:
+            continue
+        if item.key in seen and seen[item.key] != item.value:
+            conflicts.add(item.key)
+        seen[item.key] = item.value
+    return conflicts
+
+
+def _satisfies(actual: Any, expected: Any) -> bool:
+    """Whether one trusted fact satisfies one required-evidence condition.
+
+    Type-exact on purpose. Python says `1 == True` and `0 == False`, so a
+    worker returning `1` where the policy requires the boolean `true` would
+    have satisfied a safety condition with a number — and three such numbers
+    are the whole distance between an outage report and an authorized
+    infrastructure mutation. A required boolean is satisfied only by that
+    boolean.
+    """
+    if isinstance(expected, bool) or isinstance(actual, bool):
+        return actual is expected
+    return actual == expected
+
+
 def evaluate(
     proposal: Proposal,
     evidence: Iterable[Evidence],
@@ -30,6 +65,10 @@ def evaluate(
 ) -> PolicyDecision:
     """Deterministic authorization. Pure function, no I/O, no model text."""
     policy = policy or default_policy()
+    # Materialised once: the gate reads the evidence twice, and a generator
+    # read twice is empty the second time — which would silently disable the
+    # contradiction check rather than fail it.
+    evidence = list(evidence)
     snapshot = trusted_evidence_map(evidence)
     snapshot_hash = canonical_hash(snapshot)
 
@@ -64,10 +103,20 @@ def evaluate(
             policy.default.reason,
         )
 
+    contradicted = sorted(
+        trusted_evidence_conflicts(evidence) & set(rule.required_evidence)
+    )
+    if contradicted:
+        return decide(
+            Decision.DENIED,
+            "CONTRADICTORY_EVIDENCE",
+            f"Trusted evidence contradicts itself: {contradicted}",
+        )
+
     missing = sorted(
         key
         for key, expected in rule.required_evidence.items()
-        if snapshot.get(key) != expected
+        if not _satisfies(snapshot.get(key), expected)
     )
     if missing:
         return decide(

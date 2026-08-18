@@ -328,6 +328,39 @@ An unknown trust level is never coerced to `TRUSTED_TOOL`. A verifier verdict
 outside the contract is likewise not recovery — only the exact string
 `RECOVERED` proceeds.
 
+### The envelope itself, not only its contents
+
+Two further faults were deployed to the real investigator, because a worker can
+break its contract in the *shape* of its answer rather than in the evidence it
+carries. Both ran against the live fleet with the real orchestrator calling a
+real authenticated worker.
+
+```
+fault mode          investigator_truthy_budget_string
+injected            "budget_exceeded": "false"   (a string, not a boolean)
+incident            INC-20260818-5FB6F0
+result              WORKER_CONTRACT_INVALID
+                    "investigator envelope rejected: not the declared shape"
+incident status     ESCALATED       mutations 0
+
+fault mode          investigator_empty_proposal
+injected            "proposal": {}   (empty, not absent)
+incident            INC-20260818-82038F
+evidence collected  12 real trusted facts
+result              WORKER_CONTRACT_INVALID
+manager summary     "A checking step returned information the system could not
+                     trust, so it was discarded. Nothing was changed."
+incident status     ESCALATED       mutations 0
+```
+
+Both were read with `.get()` before Gate E's review loop closed them. `"false"`
+is a non-empty string and therefore truthy, so a complete and usable
+investigation would have been discarded as budget exhaustion. `{}` is falsy, so
+a worker breaking its own contract would have been reported to the duty manager
+as a considered decision that no remediation was warranted. Neither is a
+distinction the manager can be expected to make on our behalf, so the envelope
+is settled by a typed contract before anything branches on it.
+
 ---
 
 ## E12 — no blind retry
@@ -505,13 +538,15 @@ all four services            healthy, fault_mode: null
 | executor unavailable | **REAL** Cloud Run service failure | safe state, later reconciled | 1 total |
 | caller loses the executor | **REAL** timeout + surviving worker | reconciled from infrastructure | 1 total |
 | malformed worker contract | controlled payload, **real caller** | rejected | 0 |
+| truthy-string `budget_exceeded` | controlled payload, **real caller** | rejected, not read as exhaustion | 0 |
+| empty `proposal: {}` | controlled payload, **real caller** | rejected as contract-invalid | 0 |
 | final healthy path | **REAL** | autonomous 503 → 200 | 1 |
 
 ---
 
 ## Tests
 
-**Offline: 415 passed, 11 skipped** — including 136 Gate E contract tests
+**Offline: 422 passed, 11 skipped** — including 143 Gate E contract tests
 covering fault-injection isolation, malformed model output at the parser,
 dangerous and unknown actions, call bounds, budget exhaustion, doing nothing,
 authenticated-but-invalid worker payloads, retry budgets, escalation-package

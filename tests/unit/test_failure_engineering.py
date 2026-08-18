@@ -602,13 +602,17 @@ def test_the_handover_reports_only_what_an_authorized_identity_observed():
         "state": "could not be checked automatically",
         "restored": False,
     }
-    # The verifier's verdict is authoritative when there is one.
+    # The verifier's verdict is authoritative once it has passed the contract —
+    # and ONLY then. A raw body is not a verdict, however hopeful it reads.
     assert main._observe_service_state(
-        {"verification": {"verdict": "RECOVERED"}}
+        {"verification_checked": {"recovered": True}}
     )["restored"] is True
     assert main._observe_service_state(
-        {"verification": {"verdict": "STILL_FAILING"}}
+        {"verification_checked": {"recovered": False}}
     )["restored"] is False
+    assert main._observe_service_state(
+        {"verification": {"verdict": "RECOVERED"}}
+    )["restored"] is False, "an unvalidated body must never claim restoration"
     # Otherwise the investigator's trusted observation.
     assert main._observe_service_state({"service_http_status": 200})["restored"] is True
     assert main._observe_service_state({"service_http_status": 503})["restored"] is False
@@ -1116,9 +1120,11 @@ def test_a_nested_or_duplicated_contradiction_fails_closed(body, healthy):
 def test_health_verdicts_are_collected_at_any_depth():
     from scf.tools.cloud_run_evidence import _collect_health_verdicts
 
+    # Two verdicts from the nested failure: the recognised `state` key, and the
+    # failure word in the value itself. Both say the same thing.
     assert _collect_health_verdicts(
         {"ok": True, "checks": {"db": {"state": "failed"}}}
-    ) == [True, False]
+    ) == [True, False, False]
     assert _collect_health_verdicts({"nothing": "here"}) == []
 
 
@@ -1328,3 +1334,138 @@ def test_a_truncated_health_body_is_not_read_as_an_answer():
     truncated = '{"healthy": true, "pad": "' + "x" * MAX_HEALTH_BODY_BYTES
     assert len(truncated) > MAX_HEALTH_BODY_BYTES
     assert body_is_healthy(truncated) is False
+
+
+# --- Codex Gate E audit, round 8 ---------------------------------------------
+
+
+def test_a_failure_under_an_unrecognised_key_is_still_a_failure():
+    """`{"healthy": true, "checks": {"db": "failed"}}` is not a healthy service."""
+    from scf.tools.cloud_run_evidence import body_is_healthy
+
+    assert body_is_healthy('{"healthy": true, "checks": {"db": "failed"}}') is False
+    assert body_is_healthy('{"ok": true, "dependencies": ["cache: degraded"]}') is False
+    assert body_is_healthy('{"status": "UP", "note": "printer unavailable"}') is False
+
+    # Key NAMES are never scanned, so a counter under a failure-ish name is safe.
+    assert body_is_healthy('{"healthy": true, "failure_count": 0}') is True
+    assert body_is_healthy('{"healthy": true, "checks": {"db": "ok"}}') is True
+
+
+def test_a_required_boolean_is_not_satisfied_by_a_number():
+    """`1 == True` in Python. It must not be true at an authorization boundary."""
+    from scf.policy.engine import _satisfies
+
+    assert _satisfies(True, True) is True
+    assert _satisfies(1, True) is False
+    assert _satisfies(0, False) is False
+    assert _satisfies(True, 1) is False
+    assert _satisfies("dispatch-web", "dispatch-web") is True
+
+
+def test_numeric_evidence_cannot_authorize_a_mutation():
+    from scf.domain.enums import Decision
+    from scf.policy import evaluate
+
+    def ev(key, value):
+        return Evidence(key=key, value=value, supports="t", source_agent="systems",
+                        trust_level=TrustLevel.TRUSTED_TOOL)
+
+    proposal = Proposal(
+        action_type=ActionType.FLIP_TRAFFIC_TO_LAST_GOOD,
+        target_ref="dispatch-web",
+        confidence=0.9,
+        rationale="t",
+        proposed_by="agent:systems",
+    )
+    numeric = [ev(k, 1) for k in
+               ("service_unhealthy", "candidate_revision_approved",
+                "candidate_probe_healthy")]
+    assert evaluate(proposal, numeric).decision is Decision.DENIED
+
+    real = [ev(k, True) for k in
+            ("service_unhealthy", "candidate_revision_approved",
+             "candidate_probe_healthy")]
+    assert evaluate(proposal, real).decision is Decision.AUTO_ALLOWED
+
+
+def test_contradictory_trusted_evidence_is_denied_not_resolved_by_ordering():
+    """Last-write-wins is a coin toss with the safety property, not a reading."""
+    from scf.domain.enums import Decision
+    from scf.policy import evaluate
+    from scf.policy.engine import trusted_evidence_conflicts
+
+    def ev(key, value):
+        return Evidence(key=key, value=value, supports="t", source_agent="systems",
+                        trust_level=TrustLevel.TRUSTED_TOOL)
+
+    proposal = Proposal(
+        action_type=ActionType.FLIP_TRAFFIC_TO_LAST_GOOD,
+        target_ref="dispatch-web",
+        confidence=0.9,
+        rationale="t",
+        proposed_by="agent:systems",
+    )
+    contradictory = [
+        ev("service_unhealthy", False),
+        ev("service_unhealthy", True),
+        ev("candidate_revision_approved", True),
+        ev("candidate_probe_healthy", True),
+    ]
+    assert trusted_evidence_conflicts(contradictory) == {"service_unhealthy"}
+    decision = evaluate(proposal, contradictory)
+    assert decision.decision is Decision.DENIED
+    assert decision.reason_code == "CONTRADICTORY_EVIDENCE"
+
+
+def test_the_gate_reads_a_generator_of_evidence_exactly_once():
+    """A generator read twice is empty the second time — silently disabling a check."""
+    from scf.domain.enums import Decision
+    from scf.policy import evaluate
+
+    def ev(key, value):
+        return Evidence(key=key, value=value, supports="t", source_agent="systems",
+                        trust_level=TrustLevel.TRUSTED_TOOL)
+
+    proposal = Proposal(
+        action_type=ActionType.FLIP_TRAFFIC_TO_LAST_GOOD,
+        target_ref="dispatch-web",
+        confidence=0.9,
+        rationale="t",
+        proposed_by="agent:systems",
+    )
+    stream = (item for item in [
+        ev("service_unhealthy", False),
+        ev("service_unhealthy", True),
+        ev("candidate_revision_approved", True),
+        ev("candidate_probe_healthy", True),
+    ])
+    assert evaluate(proposal, stream).reason_code == "CONTRADICTORY_EVIDENCE"
+
+
+def test_a_worker_response_is_bounded_before_it_is_classified():
+    from scf.app import invoke
+
+    source = _stripped_source(invoke.call_service)
+    assert "httpx.stream" in source
+    assert "httpx.post" not in source
+    assert "MAX_WORKER_RESPONSE_BYTES" in source
+    assert invoke.MAX_WORKER_RESPONSE_BYTES <= 4 * 1024 * 1024
+
+    # Refused, not truncated: half a receipt is a different receipt.
+    assert "raise WorkerResponseTooLarge" in source
+
+    from scf.app.main import _categorise, DownstreamFailure
+
+    assert _categorise(
+        DownstreamFailure("investigator", "oversized_response", "x")
+    ) is FailureCategory.WORKER_CONTRACT_INVALID
+
+
+def test_the_probe_reads_in_bounded_chunks():
+    """Without a chunk size the bound is discovered one megabyte-chunk too late."""
+    from scf.tools import cloud_run_evidence
+
+    source = _stripped_source(cloud_run_evidence.probe_health)
+    assert "chunk_size=READ_CHUNK_BYTES" in source
+    assert cloud_run_evidence.READ_CHUNK_BYTES <= cloud_run_evidence.MAX_HEALTH_BODY_BYTES

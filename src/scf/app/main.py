@@ -9,7 +9,7 @@ from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, ValidationError
 
 from scf import config
-from scf.app.invoke import call_service
+from scf.app.invoke import WorkerResponseTooLarge, call_service
 from scf.domain.enums import (
     ActionType,
     Decision,
@@ -356,6 +356,10 @@ async def _call(
             trace_header=trace_header,
             timeout=CALL_TIMEOUTS.get(service, 60.0),
         )
+    except WorkerResponseTooLarge as exc:
+        # Refused unread, and categorised as what it is: a worker that broke the
+        # size contract, not a worker that could not be reached.
+        raise DownstreamFailure(service, "oversized_response", str(exc)) from exc
     except Exception as exc:  # noqa: BLE001 - converted to a typed failure
         raise DownstreamFailure(service, type(exc).__name__, str(exc)) from exc
     if response.status_code >= 400:
@@ -404,7 +408,7 @@ def _categorise(failure: DownstreamFailure) -> FailureCategory:
         return FailureCategory.VERIFIER_UNAVAILABLE
     if failure.kind in TIMEOUT_KINDS:
         return FailureCategory.WORKER_TIMEOUT
-    if failure.kind == "malformed_response":
+    if failure.kind in ("malformed_response", "oversized_response"):
         return FailureCategory.WORKER_CONTRACT_INVALID
     return FailureCategory.WORKER_UNAVAILABLE
 
@@ -502,13 +506,16 @@ def _observe_service_state(outcome: dict[str, Any]) -> dict[str, Any]:
     cosmetic one. So this reports what was genuinely observed by an identity
     authorized to look, and says plainly when nothing was.
     """
-    verdict = (outcome.get("verification") or {}).get("verdict")
-    if verdict == "RECOVERED":
-        return {"state": "the dispatch service is responding normally", "restored": True}
-    if verdict:
+    checked = outcome.get("verification_checked")
+    if isinstance(checked, dict):
+        restored = checked.get("recovered") is True
         return {
-            "state": "the dispatch service is still not responding normally",
-            "restored": False,
+            "state": (
+                "the dispatch service is responding normally"
+                if restored
+                else "the dispatch service is still not responding normally"
+            ),
+            "restored": restored,
         }
 
     status = outcome.get("service_http_status")
@@ -871,6 +878,13 @@ async def _verify_and_close(
             trace_id,
             outcome,
         )
+    # Only a verdict that passed the contract may speak for the service. The
+    # raw body must never reach the manager-facing summary: a verifier
+    # answering `{"verdict": "RECOVERED"}` with none of the three required
+    # observations is rejected here, and an escalation package that still read
+    # the raw string would have told the manager operations were restored while
+    # the incident escalated.
+    outcome["verification_checked"] = {"recovered": checked.recovered()}
     await run_in_threadpool(
         repo.append_audit,
         incident_id,

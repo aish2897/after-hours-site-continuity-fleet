@@ -47,6 +47,8 @@ INVESTIGATOR_MALFORMED: Final[str] = "investigator_malformed"
 INVESTIGATOR_DANGEROUS_PROPOSAL: Final[str] = "investigator_dangerous_proposal"
 INVESTIGATOR_UNKNOWN_ACTION: Final[str] = "investigator_unknown_action"
 INVESTIGATOR_LOOP: Final[str] = "investigator_loop"
+INVESTIGATOR_TRUTHY_BUDGET_STRING: Final[str] = "investigator_truthy_budget_string"
+INVESTIGATOR_EMPTY_PROPOSAL: Final[str] = "investigator_empty_proposal"
 EXECUTOR_5XX: Final[str] = "executor_5xx"
 EXECUTOR_DELAY_BEFORE_MUTATION: Final[str] = "executor_delay_before_mutation"
 VERIFIER_5XX: Final[str] = "verifier_5xx"
@@ -64,6 +66,8 @@ KNOWN_MODES: Final[frozenset[str]] = frozenset(
         INVESTIGATOR_DANGEROUS_PROPOSAL,
         INVESTIGATOR_UNKNOWN_ACTION,
         INVESTIGATOR_LOOP,
+        INVESTIGATOR_TRUTHY_BUDGET_STRING,
+        INVESTIGATOR_EMPTY_PROPOSAL,
         EXECUTOR_5XX,
         EXECUTOR_DELAY_BEFORE_MUTATION,
         VERIFIER_5XX,

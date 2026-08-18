@@ -141,6 +141,15 @@ def _collect_health_verdicts(payload: Any, depth: int = 0) -> list[bool]:
         return [False]
 
     verdicts: list[bool] = []
+    if isinstance(payload, str):
+        # A failure reported under a key this reader does not recognise is
+        # still a failure. `{"healthy": true, "checks": {"db": "failed"}}` says
+        # a dependency is down; reading only recognised health keys called that
+        # body healthy, because `db` is not one of them. Any *string value*
+        # anywhere that reports failure vetoes the body. Only values are read,
+        # never key names, so a healthy body carrying `"failure_count": 0` — a
+        # number, under a name that merely contains the word — is unaffected.
+        return [False] if _text_says_unhealthy(payload.strip().lower()) else []
     if isinstance(payload, dict):
         # A health key that contradicted itself is a contradiction, whichever
         # value the parser happened to keep.
@@ -172,6 +181,13 @@ def _collect_health_verdicts(payload: Any, depth: int = 0) -> list[bool]:
         for item in payload:
             verdicts.extend(_collect_health_verdicts(item, depth + 1))
     return verdicts
+
+
+def _text_says_unhealthy(text: str) -> bool:
+    """Whether a plain string reports a failure, as whole words and phrases."""
+    if any(phrase in text for phrase in _UNHEALTHY_PHRASES):
+        return True
+    return bool(set(re.findall(r"[a-z]+", text)) & _UNHEALTHY_WORDS)
 
 
 def _text_is_healthy(text: str) -> bool:
@@ -260,7 +276,7 @@ def probe_health(url: str) -> tuple[int, str]:
         with httpx.stream("GET", url, timeout=10.0, follow_redirects=True) as response:
             chunks: list[bytes] = []
             read = 0
-            for chunk in response.iter_bytes():
+            for chunk in response.iter_bytes(chunk_size=READ_CHUNK_BYTES):
                 chunks.append(chunk)
                 read += len(chunk)
                 if read > MAX_HEALTH_BODY_BYTES:
@@ -288,6 +304,11 @@ def _ev(key: str, value: Any, supports: str) -> Evidence:
 #: verifier instead of returning "unhealthy".
 MAX_HEALTH_BODY_BYTES = 64 * 1024
 MAX_HEALTH_DEPTH = 20
+#: Read size for the streamed probe. Without it httpx yields whatever the
+#: transport hands over, so a single decoded chunk can be megabytes and the
+#: bound is only discovered after that chunk is already in memory — the same
+#: defect as buffering, arriving one chunk later.
+READ_CHUNK_BYTES = 8 * 1024
 
 #: A failing probe is confirmed once before it counts as evidence.
 CONFIRM_UNHEALTHY_AFTER_SECONDS = 3.0

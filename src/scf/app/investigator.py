@@ -246,6 +246,24 @@ async def collect_evidence(
             }
         ]
 
+    if faults.is_mode(faults.INVESTIGATOR_TRUTHY_BUDGET_STRING):
+        log_event("fault_injection", severity="WARNING", trace_id=trace_id,
+                  incident_id=request.incident_id, label=faults.LABEL,
+                  fault_mode=faults.active())
+        # A complete, usable investigation carrying a *string* where a boolean
+        # was declared. `"false"` is non-empty and therefore truthy: read with
+        # `.get()` the caller would have thrown this whole investigation away
+        # as budget exhaustion and escalated an incident it could have fixed.
+        payload["budget_exceeded"] = "false"
+    if faults.is_mode(faults.INVESTIGATOR_EMPTY_PROPOSAL):
+        log_event("fault_injection", severity="WARNING", trace_id=trace_id,
+                  incident_id=request.incident_id, label=faults.LABEL,
+                  fault_mode=faults.active())
+        # `{}` is falsy but it is not the same statement as `null`. Absent means
+        # "no remediation is warranted"; empty means the worker broke its own
+        # contract, and the manager must be told which of the two happened.
+        payload["proposal"] = {}
+
     log_event(
         "investigator_evidence_collected",
         trace_id=trace_id,
