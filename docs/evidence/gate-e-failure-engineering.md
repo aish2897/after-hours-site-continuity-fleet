@@ -503,6 +503,23 @@ revisions                    4 -> 4      no revision minted
 replays                      refused, zero mutations
 ```
 
+Re-verified again on the final build, after all eleven review rounds:
+
+```
+build                        orchestrator-00136-ck2  agent-systems-00117-ffl
+                             executor-00117-pjn      verifier-00039-jfm
+all four services            healthy, fault_mode: null
+autonomous 503 -> 200        INC-20260818-F9335B     RESOLVED
+mutation                     serving.knative.dev/v1 replaceService, HTTP 200
+                             conflict False, action SUCCEEDED
+verification                 RECOVERED, healthy, traffic exclusive
+terminalization              VERIFIED, serves authorized exclusively
+generation                   332 -> 333              one mutation
+replays x3                   refused incident_closed:RESOLVED
+generation after replays     333                     no further mutation
+audit chain                  15 records, audit_seq 14, tail hash recorded
+```
+
 Security boundaries re-checked after the whole gate:
 
 ```
