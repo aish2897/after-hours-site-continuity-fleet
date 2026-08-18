@@ -23,7 +23,7 @@ from scf.domain.failures import (
     handling,
 )
 from scf.domain.ids import new_incident_id
-from scf.domain.state_machine import path_to
+from scf.domain.state_machine import ASSERTION_STATES, path_to
 from scf.domain.models import (
     ActionRecord,
     Evidence,
@@ -292,11 +292,20 @@ async def _escalate(
     )
     if current in (IncidentStatus.RESOLVED, IncidentStatus.ESCALATED):
         return current.value
-    for step in path_to(current, IncidentStatus.ESCALATED):
+    for step in path_to(current, IncidentStatus.ESCALATED, avoid=ASSERTION_STATES):
         await run_in_threadpool(repo.transition, incident_id, step, trace_id=trace_id)
-    return IncidentStatus(
-        (await run_in_threadpool(repo.get, incident_id))["status"]
-    ).value
+    settled = IncidentStatus((await run_in_threadpool(repo.get, incident_id))["status"])
+    if settled is not IncidentStatus.ESCALATED:
+        # Loudly, never silently. An incident that could not be escalated is
+        # one nobody has been told about.
+        log_event(
+            "escalation_route_unavailable",
+            severity="ERROR",
+            trace_id=trace_id,
+            incident_id=incident_id,
+            stuck_at=settled.value,
+        )
+    return settled.value
 
 
 #: Per-service call bounds. A worker that hangs must be ended by the caller's
@@ -434,6 +443,53 @@ async def _fail(
     trace_id: str | None,
     outcome: dict[str, Any],
 ) -> dict[str, Any]:
+    """Report a failure, and never become one.
+
+    `_fail` is called from inside every `except` block in this module, so an
+    exception raised HERE escapes the handler that was already handling
+    something — past the workflow catch-all, out of the HTTP endpoint, leaving
+    a 500 and an incident parked wherever it happened to be. The handler whose
+    entire purpose is "no failure goes unreported" was the one path that could
+    fail unreported.
+
+    Its writes are therefore best-effort. A control-plane write failing is bad,
+    but it is strictly worse to lose the handover as well.
+    """
+    try:
+        return await _fail_unguarded(repo, incident_id, failure, trace_id, outcome)
+    except Exception as exc:  # noqa: BLE001 - a failure handler may not fail
+        log_event(
+            "failure_handler_failed",
+            severity="CRITICAL",
+            trace_id=trace_id,
+            incident_id=incident_id,
+            failure_category=failure.category.value,
+            error_type=type(exc).__name__,
+        )
+        rule = handling(failure.category)
+        outcome["failure_category"] = failure.category.value
+        outcome["failure_detail"] = failure.detail
+        outcome["handover_incomplete"] = True
+        outcome["escalation"] = {
+            "incident_id": incident_id,
+            "correlation_id": trace_id,
+            "failure_category": failure.category.value,
+            "impact": rule.manager_summary,
+            "recommended_next_action": (
+                "Contact technical support and quote the reference below. The "
+                "system could not finish recording this handover."
+            ),
+        }
+        return outcome
+
+
+async def _fail_unguarded(
+    repo: IncidentRepository,
+    incident_id: str,
+    failure: WorkflowFailure,
+    trace_id: str | None,
+    outcome: dict[str, Any],
+) -> dict[str, Any]:
     """The single place a failure becomes state, audit and a human handover.
 
     Looking up the category in one table is what stops the workflow inventing
@@ -476,11 +532,26 @@ async def _fail(
         # raised IllegalTransition from inside the one handler whose job is to
         # guarantee a handover, so the failure it was invoked to report escaped
         # as an unhandled exception and the incident got nothing at all.
-        for step in path_to(current, rule.resting_status):
+        route = path_to(current, rule.resting_status, avoid=ASSERTION_STATES)
+        for step in route:
             await run_in_threadpool(repo.transition, incident_id, step, trace_id=trace_id)
         settled = IncidentStatus(
             (await run_in_threadpool(repo.get, incident_id))["status"]
         )
+        if not route and settled is not rule.resting_status:
+            # No truthful route to the resting state. Doing nothing here would
+            # leave the incident wherever it happened to be, with nobody told —
+            # the silent strand this handler exists to prevent. Escalate to a
+            # person instead, and say why.
+            log_event(
+                "resting_state_unreachable",
+                severity="ERROR",
+                trace_id=trace_id,
+                incident_id=incident_id,
+                current=settled.value,
+                intended=rule.resting_status.value,
+            )
+            settled = IncidentStatus(await _escalate(repo, incident_id, trace_id))
         outcome["awaiting_reconciliation"] = settled in RECONCILABLE_STATES
         outcome["final_status"] = settled.value
     else:
@@ -783,6 +854,11 @@ async def _run_remediation(
 
     # The executor cannot write the control plane. The orchestrator, which is
     # an authoritative writer, records what the executor reported.
+    # Set before any bookkeeping, so a later failure cannot produce a handover
+    # that says nothing changed about a mutation this receipt already reported.
+    if reported.mutated:
+        outcome["mutated_infrastructure"] = True
+
     if reported.duplicate:
         await run_in_threadpool(
             repo.append_audit,
@@ -797,12 +873,32 @@ async def _run_remediation(
             actor_identity="sa-executor",
             trace_id=trace_id,
         )
-    elif receipt.get("action"):
-        await run_in_threadpool(
-            repo.record_action,
-            incident_id,
-            ActionRecord.model_validate(receipt["action"]),
-        )
+    elif isinstance(receipt.get("action"), dict):
+        # Record the action if it is recordable, and carry on if it is not.
+        #
+        # `action` was the one worker field handed to a strict model unguarded,
+        # in a module whose stated premise is that a 200 from an authenticated
+        # caller is not a reason to trust the payload. A malformed `action` on
+        # an otherwise VALID receipt reporting `mutated: true` raised out to the
+        # workflow catch-all, which escalated terminally and told the duty
+        # manager nothing had changed — about a traffic flip that had landed,
+        # leaving the execution at MUTATED with no route to terminalization.
+        #
+        # The typed receipt above already established what happened. This is
+        # record-keeping, and losing a record is not a reason to lose the site.
+        try:
+            action_record = ActionRecord.model_validate(receipt["action"])
+        except ValidationError as exc:
+            action_record = None
+            log_event(
+                "action_record_unreadable",
+                severity="ERROR",
+                trace_id=trace_id,
+                incident_id=incident_id,
+                error_count=exc.error_count(),
+            )
+        if action_record is not None:
+            await run_in_threadpool(repo.record_action, incident_id, action_record)
         await run_in_threadpool(
             repo.append_audit,
             incident_id,
@@ -811,6 +907,7 @@ async def _run_remediation(
             payload={
                 "action_id": receipt["action"].get("action_id"),
                 "decision_id": policy_decision.decision_id,
+                "action_record_readable": action_record is not None,
                 "target_ref": receipt["action"].get("target_ref"),
                 "target_revision": receipt.get("target_revision"),
                 "accepted": reported.mutated,
@@ -820,9 +917,6 @@ async def _run_remediation(
             actor_identity="sa-executor",
             trace_id=trace_id,
         )
-
-    if reported.mutated:
-        outcome["mutated_infrastructure"] = True
 
     if not (reported.progressed() or _execution_already_landed(receipt)):
         # `_execution_already_landed` belongs on BOTH paths, not just recovery.

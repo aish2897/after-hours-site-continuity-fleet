@@ -18,10 +18,18 @@ LEGAL_TRANSITIONS: dict[IncidentStatus, frozenset[IncidentStatus]] = {
     S.INTAKE: frozenset({S.INVESTIGATING, S.ESCALATED}),
     S.INVESTIGATING: frozenset({S.PROPOSED, S.ESCALATED}),
     S.PROPOSED: frozenset({S.POLICY_EVALUATED, S.ESCALATED}),
+    # ESCALATED is reachable directly from each of these, and that matters for
+    # truthfulness rather than convenience. Escalating from POLICY_EVALUATED
+    # used to route through DENIED, permanently recording that the policy gate
+    # refused an action it had in fact authorized; escalating from AUTO_ALLOWED
+    # or APPROVED routed through EXECUTING and EXECUTION_FAILED, recording an
+    # attempted mutation that was never issued. The incident history is part of
+    # the audit trail, so a transition written to reach a destination is a
+    # claim, and every claim in it has to be true.
     S.POLICY_EVALUATED: frozenset(
-        {S.AUTO_ALLOWED, S.WAITING_FOR_APPROVAL, S.DENIED}
+        {S.AUTO_ALLOWED, S.WAITING_FOR_APPROVAL, S.DENIED, S.ESCALATED}
     ),
-    S.AUTO_ALLOWED: frozenset({S.EXECUTING}),
+    S.AUTO_ALLOWED: frozenset({S.EXECUTING, S.ESCALATED}),
     # ESCALATED is reachable directly, and deliberately. There is no approval
     # runtime yet, so without this edge an incident that needs authorization
     # parks here and no endpoint in the fleet can ever move it again. Routing
@@ -30,9 +38,12 @@ LEGAL_TRANSITIONS: dict[IncidentStatus, frozenset[IncidentStatus]] = {
     S.WAITING_FOR_APPROVAL: frozenset(
         {S.APPROVED, S.APPROVAL_DENIED, S.APPROVAL_EXPIRED, S.ESCALATED}
     ),
-    S.APPROVED: frozenset({S.EXECUTING}),
+    S.APPROVED: frozenset({S.EXECUTING, S.ESCALATED}),
     S.EXECUTING: frozenset({S.EXECUTED, S.EXECUTION_FAILED}),
-    S.EXECUTED: frozenset({S.VERIFYING}),
+    # ESCALATED direct, so abandoning a completed execution does not have to
+    # claim verification began. The mutation landed; what failed was everything
+    # after it, and the trail should say exactly that.
+    S.EXECUTED: frozenset({S.VERIFYING, S.ESCALATED}),
     S.VERIFYING: frozenset({S.RESOLVED, S.REMEDIATION_FAILED}),
     S.DENIED: frozenset({S.ESCALATED}),
     S.APPROVAL_DENIED: frozenset({S.ESCALATED}),
@@ -70,7 +81,21 @@ def assert_transition(current: IncidentStatus, target: IncidentStatus) -> None:
         raise IllegalTransition(current, target)
 
 
-def path_to(current: IncidentStatus, target: IncidentStatus) -> tuple[IncidentStatus, ...]:
+#: States that assert something was done. Passing THROUGH one of these on the
+#: way somewhere else writes that assertion into the incident history, so a
+#: route that merely wants to reach a destination must not traverse them.
+ASSERTION_STATES: frozenset[IncidentStatus] = frozenset(
+    {S.AUTO_ALLOWED, S.APPROVED, S.EXECUTING, S.EXECUTED, S.VERIFYING,
+     S.DENIED, S.APPROVAL_DENIED, S.APPROVAL_EXPIRED, S.RESOLVED}
+)
+
+
+def path_to(
+    current: IncidentStatus,
+    target: IncidentStatus,
+    *,
+    avoid: frozenset[IncidentStatus] = frozenset(),
+) -> tuple[IncidentStatus, ...]:
     """The shortest legal sequence of transitions from `current` to `target`.
 
     Empty when `current` is already `target`, or when no legal path exists.
@@ -93,7 +118,7 @@ def path_to(current: IncidentStatus, target: IncidentStatus) -> tuple[IncidentSt
     while queue:
         node, route = queue.pop(0)
         for nxt in sorted(LEGAL_TRANSITIONS[node], key=lambda s: s.value):
-            if nxt in seen:
+            if nxt in seen or (nxt in avoid and nxt is not target):
                 continue
             step = (*route, nxt)
             if nxt is target:

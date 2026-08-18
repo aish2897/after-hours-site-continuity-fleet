@@ -2121,3 +2121,105 @@ def test_path_finding_is_the_only_description_of_a_legal_route():
     assert "ESCALATION_PATHS" not in source, (
         "a second hand-written route table will drift from the transition table"
     )
+
+
+# --- Internal hostile review, round 3 ----------------------------------------
+
+
+def test_an_unreadable_action_record_does_not_lose_a_landed_mutation():
+    """Bookkeeping must not destroy the workflow it is recording."""
+    from scf.app import main
+
+    source = inspect.getsource(main._run_remediation)
+    assert 'elif isinstance(receipt.get("action"), dict):' in source, (
+        "a non-dict action must not reach a strict model"
+    )
+    assert "except ValidationError" in source[source.index('receipt["action"]'):]
+    # And the mutation is recorded in the outcome BEFORE any bookkeeping runs,
+    # so no later failure can produce a handover that says nothing changed.
+    assert source.index('outcome["mutated_infrastructure"] = True') < source.index(
+        "repo.record_action"
+    )
+
+
+def test_no_escalation_route_writes_a_state_that_did_not_happen():
+    """The incident history is audit. Every transition in it is a claim."""
+    from scf.domain.state_machine import ASSERTION_STATES, TERMINAL_STATES, path_to
+
+    for start in IncidentStatus:
+        if start in TERMINAL_STATES:
+            continue
+        route = path_to(start, IncidentStatus.ESCALATED, avoid=ASSERTION_STATES)
+        assert route, f"{start} has no truthful route to ESCALATED"
+        fabricated = [
+            s for s in route if s in ASSERTION_STATES and s is not IncidentStatus.ESCALATED
+        ]
+        assert not fabricated, f"{start} -> ESCALATED fabricates {fabricated}"
+
+    # The two that used to lie, specifically.
+    assert path_to(
+        IncidentStatus.POLICY_EVALUATED, IncidentStatus.ESCALATED, avoid=ASSERTION_STATES
+    ) == (IncidentStatus.ESCALATED,), "escalating must not record a policy denial"
+    assert path_to(
+        IncidentStatus.AUTO_ALLOWED, IncidentStatus.ESCALATED, avoid=ASSERTION_STATES
+    ) == (IncidentStatus.ESCALATED,), "escalating must not record an attempted mutation"
+
+
+def test_the_failure_handler_cannot_itself_fail():
+    """It is called from inside every except block in the module."""
+    import asyncio
+
+    from scf.app import main
+
+    class DeadControlPlane:
+        def get(self, *a, **k):
+            raise RuntimeError("control plane down")
+
+        def append_audit(self, *a, **k):
+            raise RuntimeError("control plane down")
+
+        def transition(self, *a, **k):
+            raise RuntimeError("control plane down")
+
+        def save_escalation(self, *a, **k):
+            raise RuntimeError("control plane down")
+
+    outcome = asyncio.run(
+        main._fail(
+            DeadControlPlane(),
+            "INC-1",
+            main.WorkflowFailure(FailureCategory.EXECUTOR_UNAVAILABLE, "x"),
+            "trace",
+            {},
+        )
+    )
+    assert outcome["handover_incomplete"] is True
+    assert outcome["escalation"]["failure_category"] == "EXECUTOR_UNAVAILABLE"
+    assert outcome["escalation"]["impact"], "the manager still gets told something"
+
+
+def test_layered_prefixes_cannot_disguise_a_truncated_body():
+    """One ordered pass left residue, and residue means word matching."""
+    from scf.tools.cloud_run_evidence import body_is_healthy
+
+    for body in (
+        ")]}'\n﻿{\"status\":\"UP\"",
+        ")]}'\n)]}'\n)]}'\n{\"status\":\"UP\"",
+        "for(;;);while(1);{\"status\":\"UP\"",
+        "while(1);while(1);{\"status\":\"UP\"",
+    ):
+        assert body_is_healthy(body) is False, repr(body)
+
+    # Complete bodies behind a prefix still read correctly, and a body made
+    # only of guard strings terminates rather than occupying the reader.
+    assert body_is_healthy("﻿{\"status\":\"UP\"}") is True
+    assert body_is_healthy(")]}'\n{\"status\":\"UP\"}") is True
+    assert body_is_healthy("while(1);" * 50) is False
+
+
+def test_fail_never_settles_an_incident_silently():
+    from scf.app import main
+
+    source = _stripped_source(main._fail_unguarded)
+    assert "resting_state_unreachable" in source, "a no-op must be reported"
+    assert "await _escalate(repo, incident_id, trace_id)" in source
