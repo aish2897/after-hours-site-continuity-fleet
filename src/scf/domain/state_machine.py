@@ -22,8 +22,13 @@ LEGAL_TRANSITIONS: dict[IncidentStatus, frozenset[IncidentStatus]] = {
         {S.AUTO_ALLOWED, S.WAITING_FOR_APPROVAL, S.DENIED}
     ),
     S.AUTO_ALLOWED: frozenset({S.EXECUTING}),
+    # ESCALATED is reachable directly, and deliberately. There is no approval
+    # runtime yet, so without this edge an incident that needs authorization
+    # parks here and no endpoint in the fleet can ever move it again. Routing
+    # it out through APPROVAL_DENIED instead would record that a person refused
+    # the repair, which nobody did.
     S.WAITING_FOR_APPROVAL: frozenset(
-        {S.APPROVED, S.APPROVAL_DENIED, S.APPROVAL_EXPIRED}
+        {S.APPROVED, S.APPROVAL_DENIED, S.APPROVAL_EXPIRED, S.ESCALATED}
     ),
     S.APPROVED: frozenset({S.EXECUTING}),
     S.EXECUTING: frozenset({S.EXECUTED, S.EXECUTION_FAILED}),
@@ -63,3 +68,36 @@ def can_transition(current: IncidentStatus, target: IncidentStatus) -> bool:
 def assert_transition(current: IncidentStatus, target: IncidentStatus) -> None:
     if not can_transition(current, target):
         raise IllegalTransition(current, target)
+
+
+def path_to(current: IncidentStatus, target: IncidentStatus) -> tuple[IncidentStatus, ...]:
+    """The shortest legal sequence of transitions from `current` to `target`.
+
+    Empty when `current` is already `target`, or when no legal path exists.
+
+    This exists because two hand-written mechanisms were answering the same
+    question and disagreeing: an escalation path table listing routes by hand,
+    and a single-hop write that assumed the resting state was always one edge
+    away. The single hop was reachable with an illegal target — and it lived
+    inside the very handler whose job is to make sure a failure always produces
+    a handover, so it turned a recoverable failure into an unhandled exception
+    and no handover at all.
+
+    The transition table is the only description of what is legal, so it should
+    be the only thing consulted.
+    """
+    if current is target:
+        return ()
+    seen = {current}
+    queue: list[tuple[IncidentStatus, tuple[IncidentStatus, ...]]] = [(current, ())]
+    while queue:
+        node, route = queue.pop(0)
+        for nxt in sorted(LEGAL_TRANSITIONS[node], key=lambda s: s.value):
+            if nxt in seen:
+                continue
+            step = (*route, nxt)
+            if nxt is target:
+                return step
+            seen.add(nxt)
+            queue.append((nxt, step))
+    return ()

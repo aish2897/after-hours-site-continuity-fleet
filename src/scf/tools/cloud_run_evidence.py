@@ -161,6 +161,10 @@ _NEGATED_FAILURE = re.compile(
 )
 
 
+#: Guard strings some servers prepend to a JSON body to defeat script
+#: inclusion. They are not part of the document and must not disguise it.
+_JSON_PREFIXES = (")]}'" + chr(10), ")]}'," + chr(10), ")]}'", "while(1);", "for(;;);")
+
 #: Keys a JSON health body might answer with. Checked in order.
 _HEALTH_KEYS = ("healthy", "ok", "ready", "serving", "status", "state")
 
@@ -330,6 +334,15 @@ def body_is_healthy(body: str) -> bool:
     if not text:
         return False
 
+    # A BOM is not whitespace, so `.strip()` leaves it in place and the body
+    # stops "looking like JSON" on its first character alone. A failing service
+    # behind a proxy that prepends anything — a BOM, an XSSI guard — therefore
+    # skipped the truncated-JSON guard entirely and fell into word matching,
+    # which is exactly the half-delivered-response case that guard exists for.
+    text = text.lstrip("﻿")
+    for prefix in _JSON_PREFIXES:
+        if text.startswith(prefix):
+            text = text[len(prefix):].lstrip()
     looks_like_json = text[:1] in ("{", "[")
     try:
         payload = json.loads(text, object_pairs_hook=_object_pairs)

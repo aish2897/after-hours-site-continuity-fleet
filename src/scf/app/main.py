@@ -23,6 +23,7 @@ from scf.domain.failures import (
     handling,
 )
 from scf.domain.ids import new_incident_id
+from scf.domain.state_machine import path_to
 from scf.domain.models import (
     ActionRecord,
     Evidence,
@@ -280,30 +281,6 @@ class DownstreamFailure(Exception):
         self.detail = detail[:300]
 
 
-#: Legal walk from a mid-workflow state to ESCALATED. The state machine has no
-#: direct edge from most active states, so failure has to be routed through the
-#: declared failure states rather than jumping.
-ESCALATION_PATHS: dict[IncidentStatus, tuple[IncidentStatus, ...]] = {
-    IncidentStatus.POLICY_EVALUATED: (IncidentStatus.DENIED, IncidentStatus.ESCALATED),
-    IncidentStatus.AUTO_ALLOWED: (
-        IncidentStatus.EXECUTING,
-        IncidentStatus.EXECUTION_FAILED,
-        IncidentStatus.ESCALATED,
-    ),
-    IncidentStatus.EXECUTING: (
-        IncidentStatus.EXECUTION_FAILED,
-        IncidentStatus.ESCALATED,
-    ),
-    IncidentStatus.EXECUTED: (
-        IncidentStatus.VERIFYING,
-        IncidentStatus.REMEDIATION_FAILED,
-        IncidentStatus.ESCALATED,
-    ),
-    IncidentStatus.VERIFYING: (
-        IncidentStatus.REMEDIATION_FAILED,
-        IncidentStatus.ESCALATED,
-    ),
-}
 
 
 async def _escalate(
@@ -315,9 +292,11 @@ async def _escalate(
     )
     if current in (IncidentStatus.RESOLVED, IncidentStatus.ESCALATED):
         return current.value
-    for step in ESCALATION_PATHS.get(current, (IncidentStatus.ESCALATED,)):
+    for step in path_to(current, IncidentStatus.ESCALATED):
         await run_in_threadpool(repo.transition, incident_id, step, trace_id=trace_id)
-    return IncidentStatus.ESCALATED.value
+    return IncidentStatus(
+        (await run_in_threadpool(repo.get, incident_id))["status"]
+    ).value
 
 
 #: Per-service call bounds. A worker that hangs must be ended by the caller's
@@ -491,12 +470,19 @@ async def _fail(
         current = IncidentStatus(
             (await run_in_threadpool(repo.get, incident_id))["status"]
         )
-        if current is not rule.resting_status:
-            await run_in_threadpool(
-                repo.transition, incident_id, rule.resting_status, trace_id=trace_id
-            )
-        outcome["awaiting_reconciliation"] = True
-        outcome["final_status"] = rule.resting_status.value
+        # Walked, not assumed. A single hop presumed the resting state was
+        # always one legal edge away — true of every raise site that existed
+        # when it was written, and false the moment a new one appeared. It then
+        # raised IllegalTransition from inside the one handler whose job is to
+        # guarantee a handover, so the failure it was invoked to report escaped
+        # as an unhandled exception and the incident got nothing at all.
+        for step in path_to(current, rule.resting_status):
+            await run_in_threadpool(repo.transition, incident_id, step, trace_id=trace_id)
+        settled = IncidentStatus(
+            (await run_in_threadpool(repo.get, incident_id))["status"]
+        )
+        outcome["awaiting_reconciliation"] = settled in RECONCILABLE_STATES
+        outcome["final_status"] = settled.value
     else:
         outcome["final_status"] = await _escalate(repo, incident_id, trace_id)
 
@@ -748,13 +734,23 @@ async def _run_remediation(
         )
 
     if policy_decision.decision is not Decision.AUTO_ALLOWED:
+        # Record that approval was required — that is the true state — and then
+        # escalate, because nothing in this fleet can grant it yet. Returning
+        # here left the incident parked at WAITING_FOR_APPROVAL with no
+        # handover, no failure category, and no endpoint able to move it.
         await run_in_threadpool(
             repo.transition,
             incident_id,
             IncidentStatus.WAITING_FOR_APPROVAL,
             trace_id=trace_id,
         )
-        return outcome
+        raise WorkflowFailure(
+            FailureCategory.APPROVAL_REQUIRED_NO_APPROVER,
+            f"{proposal.action_type.value} requires "
+            f"{policy_decision.required_approval_role or 'an approver'}",
+            reason_code=policy_decision.reason_code,
+            required_approval_role=policy_decision.required_approval_role,
+        )
 
     await run_in_threadpool(
         repo.transition, incident_id, IncidentStatus.AUTO_ALLOWED, trace_id=trace_id
@@ -1144,7 +1140,15 @@ class TerminalizationReceipt(BaseModel):
 
     model_config = ConfigDict(extra="ignore")
 
-    verified: StrictBool
+    # Defaults to False so a REFUSAL can be read as one. The executor builds
+    # every refusal through a helper that emits no `verified` key at all, so a
+    # required field meant each refusal failed validation instead — and the
+    # contract-invalid path escalates terminally. A repaired site whose
+    # verifier had just confirmed it was closed as ESCALATED, telling the duty
+    # manager nothing had changed, while the branch written to handle exactly
+    # this case sat unreachable below.
+    verified: StrictBool = False
+    reason: str | None = None
     state: str | None = None
     serves_authorized_exclusively: StrictBool | None = None
 

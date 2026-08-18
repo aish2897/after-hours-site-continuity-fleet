@@ -190,9 +190,19 @@ def test_downstream_failure_drives_a_legal_escalation_path():
     from scf.domain.enums import IncidentStatus
     from scf.domain.state_machine import can_transition
 
-    for start, path in main.ESCALATION_PATHS.items():
+    # The hand-written route table is gone; the transition table is now the
+    # only description of a legal route. Assert the same property over EVERY
+    # starting state rather than only the ones someone remembered to list.
+    from scf.domain.state_machine import TERMINAL_STATES, path_to
+
+    del main
+    for start in IncidentStatus:
+        if start in TERMINAL_STATES:
+            continue
+        route = path_to(start, IncidentStatus.ESCALATED)
+        assert route, f"{start} cannot reach ESCALATED"
         current = start
-        for step in path:
+        for step in route:
             assert can_transition(current, step), f"illegal escalation {current}->{step}"
             current = step
         assert current is IncidentStatus.ESCALATED

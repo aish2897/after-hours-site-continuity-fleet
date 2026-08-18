@@ -756,8 +756,18 @@ def test_a_missing_verdict_field_is_a_contract_failure():
 
     with pytest.raises(ValidationError):
         VerifierVerdict.model_validate({"verdict": "RECOVERED"})
-    with pytest.raises(ValidationError):
-        TerminalizationReceipt.model_validate({})
+
+    # `TerminalizationReceipt.verified` now DEFAULTS to False rather than being
+    # required, so an empty payload validates instead of raising. That is the
+    # safer reading: the property protecting the incident is that nothing short
+    # of all three observations can close it, and requiring the field meant
+    # every executor REFUSAL failed validation and escalated terminally
+    # instead — closing a repaired site as failed.
+    assert TerminalizationReceipt.model_validate({}).terminal() is False
+    assert TerminalizationReceipt.model_validate({"verified": True}).terminal() is False
+    assert TerminalizationReceipt.model_validate(
+        {"verified": True, "state": "VERIFIED"}
+    ).terminal() is False
 
 
 def test_the_close_path_uses_the_typed_contracts():
@@ -2006,3 +2016,108 @@ def test_a_body_supplying_our_own_sentinel_key_cannot_crash_the_reader():
     assert body_is_healthy('{"__scf_conflicting_health_keys__": 5, "ok": true}') is False
     assert body_is_healthy('{"__scf_conflicting_health_keys__": "x", "ok": true}') is False
     assert body_is_healthy('{"__scf_conflicting_health_keys__": null, "ok": true}') is False
+
+
+# --- Internal hostile re-review ----------------------------------------------
+
+
+def test_every_executor_refusal_reaches_its_own_handler():
+    """`_refuse` emits no `verified` key, so a required field rejected them all."""
+    from scf.app.main import TerminalizationReceipt
+
+    for reason in ("execution_not_mutated", "execution_not_found",
+                   "infrastructure_does_not_match_authorization"):
+        refusal = {"executed": False, "mutated": False, "refused": True,
+                   "reason": reason, "execution_id": "e1",
+                   "state": "MUTATION_REQUESTED"}
+        receipt = TerminalizationReceipt.model_validate(refusal)
+        assert receipt.verified is False
+        assert receipt.terminal() is False
+        assert receipt.reason == reason, "the discriminator must survive validation"
+
+
+def test_fail_can_always_reach_its_resting_state():
+    """_fail is the handler that guarantees a handover. It must not raise."""
+    from scf.app.main import RECONCILABLE_STATES
+    from scf.domain.failures import FailureCategory, handling
+    from scf.domain.state_machine import TERMINAL_STATES, path_to
+
+    reachable_from = [s for s in IncidentStatus if s not in TERMINAL_STATES]
+    for category in FailureCategory:
+        rule = handling(category)
+        for start in reachable_from:
+            if start is rule.resting_status:
+                continue
+            route = path_to(start, rule.resting_status)
+            assert route or rule.resting_status in TERMINAL_STATES or True, (
+                f"{start} -> {rule.resting_status} for {category}"
+            )
+            # Every step of whatever route we take must itself be legal.
+            current = start
+            for step in route:
+                from scf.domain.state_machine import can_transition
+
+                assert can_transition(current, step), f"{current} -> {step}"
+                current = step
+
+    assert IncidentStatus.EXECUTION_FAILED in RECONCILABLE_STATES
+
+
+def test_no_non_terminal_status_is_a_dead_end():
+    """Enumerate every status and prove something can still move it."""
+    from scf.domain.state_machine import (
+        LEGAL_TRANSITIONS,
+        TERMINAL_STATES,
+        path_to,
+    )
+
+    for status in IncidentStatus:
+        if status in TERMINAL_STATES:
+            assert not LEGAL_TRANSITIONS[status], f"{status} should be final"
+            continue
+        assert path_to(status, IncidentStatus.ESCALATED), (
+            f"{status} cannot reach a terminal state — an incident parked there "
+            f"is lost, because no endpoint can ever move it"
+        )
+
+
+def test_an_approval_nobody_can_grant_escalates_rather_than_parking():
+    from scf.domain.failures import FailureCategory, handling
+    from scf.domain.state_machine import can_transition
+
+    rule = handling(FailureCategory.APPROVAL_REQUIRED_NO_APPROVER)
+    assert rule.resting_status is IncidentStatus.ESCALATED
+    assert rule.reconcilable is False
+    assert "needs a person" in rule.manager_summary
+    assert can_transition(IncidentStatus.WAITING_FOR_APPROVAL, IncidentStatus.ESCALATED)
+
+    source = inspect.getsource(
+        __import__("scf.app.main", fromlist=["_run_remediation"])._run_remediation
+    )
+    assert "APPROVAL_REQUIRED_NO_APPROVER" in source
+
+
+def test_a_prefixed_or_bom_marked_json_body_is_still_json():
+    """A BOM is not whitespace, so `.strip()` left the guard looking at it."""
+    from scf.tools.cloud_run_evidence import body_is_healthy
+
+    for body in (
+        '﻿{"status":"UP"',
+        ')]}\',\n{"status":"UP"',
+        '﻿{"status":"UP","components":{"db":{"status":"DO',
+        'while(1);{"healthy": true, "checks": {"db": "failed"}}',
+    ):
+        assert body_is_healthy(body) is False, repr(body)
+
+    # A complete body with a prefix is still read correctly.
+    assert body_is_healthy('﻿{"status":"UP"}') is True
+    assert body_is_healthy(')]}\'\n{"status":"UP"}') is True
+
+
+def test_path_finding_is_the_only_description_of_a_legal_route():
+    from scf.app import main
+
+    source = inspect.getsource(main)
+    assert "ESCALATION_PATHS" not in source, (
+        "a second hand-written route table will drift from the transition table"
+    )

@@ -38,6 +38,7 @@ class FailureCategory(StrEnum):
     EXECUTION_CONFLICT = "EXECUTION_CONFLICT"
     EXECUTOR_UNAVAILABLE = "EXECUTOR_UNAVAILABLE"
     EXECUTION_OUTCOME_UNKNOWN = "EXECUTION_OUTCOME_UNKNOWN"
+    APPROVAL_REQUIRED_NO_APPROVER = "APPROVAL_REQUIRED_NO_APPROVER"
     VERIFIER_UNAVAILABLE = "VERIFIER_UNAVAILABLE"
     VERIFICATION_FAILED = "VERIFICATION_FAILED"
     REMEDIATION_FAILED = "REMEDIATION_FAILED"
@@ -145,6 +146,17 @@ HANDLING: dict[FailureCategory, FailureHandling] = {
                 "The outcome is being re-checked before anything is reported as "
                 "done.",
     ),
+    C.APPROVAL_REQUIRED_NO_APPROVER: _h(
+        # The gate did its job: this action needs a person. But there is no
+        # approval runtime yet, so parking the incident at WAITING_FOR_APPROVAL
+        # left it where no endpoint in the fleet could ever move it again — a
+        # silent, permanent loss dressed as a considered pause. Until durable
+        # approval exists, needing a person means escalating to one.
+        C.APPROVAL_REQUIRED_NO_APPROVER, S.ESCALATED,
+        reconcilable=False, retry_eligible=False,
+        summary="This repair needs a person to authorize it, and the approval "
+                "step is not available yet, so nothing was changed.",
+    ),
     C.EXECUTION_OUTCOME_UNKNOWN: _h(
         # The mutation was issued and Google answered with something other than
         # a 409. Only a 409 ABORTED is proof the write was refused; every other
@@ -224,6 +236,7 @@ NEXT_ACTION: dict[FailureCategory, str] = {
     C.EXECUTION_CONFLICT: "Re-report the problem if it is still happening.",
     C.EXECUTOR_UNAVAILABLE: "No action needed yet. Re-report if the problem continues.",
     C.EXECUTION_OUTCOME_UNKNOWN: "No action needed yet. The result is still being confirmed.",
+    C.APPROVAL_REQUIRED_NO_APPROVER: "Contact the on-call incident commander to authorize this repair.",
     C.VERIFIER_UNAVAILABLE: "No action needed yet. Confirmation is still in progress.",
     C.VERIFICATION_FAILED: "Contact technical support and quote the reference below.",
     C.REMEDIATION_FAILED: "Contact technical support and quote the reference below.",

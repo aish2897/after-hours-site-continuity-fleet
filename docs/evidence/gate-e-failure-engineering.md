@@ -440,7 +440,7 @@ guessing.
 
 ## E14 — failure taxonomy
 
-Fifteen categories, one table, no free-form failure semantics anywhere. Each
+Sixteen categories, one table, no free-form failure semantics anywhere. Each
 row fixes the resting state, reconcilability, retry eligibility, audit event
 and manager summary together, so a new category cannot be added without
 deciding what a human should do about it.
@@ -459,6 +459,7 @@ deciding what a human should do about it.
 | `EXECUTION_CONFLICT` | `EXECUTION_FAILED` | **yes** | **yes** |
 | `EXECUTOR_UNAVAILABLE` | `EXECUTION_FAILED` | **yes** | **yes** |
 | `EXECUTION_OUTCOME_UNKNOWN` | `EXECUTION_FAILED` | **yes** | no |
+| `APPROVAL_REQUIRED_NO_APPROVER` | `ESCALATED` | no | no |
 | `VERIFIER_UNAVAILABLE` | `REMEDIATION_FAILED` | **yes** | no |
 | `VERIFICATION_FAILED` | `ESCALATED` | no | no |
 | `REMEDIATION_FAILED` | `ESCALATED` | no | no |
@@ -527,6 +528,27 @@ generation after replays     333                     no further mutation
 audit chain                  15 records, audit_seq 14, tail hash recorded
 ```
 
+Re-verified once more after the internal hostile review and its fixes:
+
+```
+build                        orchestrator-00137-gvj  agent-systems-00118-fb5
+                             executor-00118-dmn      verifier-00040-k9f
+all four services            healthy, fault_mode: null
+autonomous 503 -> 200        INC-20260818-7F1C25     RESOLVED
+mutation                     HTTP 200, conflict False, action SUCCEEDED
+verification                 RECOVERED, healthy, traffic exclusive
+terminalization              VERIFIED, serves authorized exclusively
+generation                   334 -> 335              one mutation
+replays x3                   refused incident_closed:RESOLVED
+generation after replays     335                     no further mutation
+executor project roles       scfDecisionReader, scfExecutionWriter,
+                             roles/logging.logWriter          (unchanged)
+scfRemediator                run.services.get, run.services.update  (unchanged)
+executor write (default)     403       executor read (default)   200
+executor -> site-directory   PERMISSION_DENIED
+executor -> dispatch-web     200
+```
+
 Security boundaries re-checked after the whole gate:
 
 ```
@@ -570,7 +592,7 @@ all four services            healthy, fault_mode: null
 
 ## Tests
 
-**Offline: 455 passed, 11 skipped** — including 175 Gate E contract tests
+**Offline: 461 passed, 11 skipped** — including 181 Gate E contract tests
 covering fault-injection isolation, malformed model output at the parser,
 dangerous and unknown actions, call bounds, budget exhaustion, doing nothing,
 authenticated-but-invalid worker payloads, retry budgets, escalation-package
