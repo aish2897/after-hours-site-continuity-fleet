@@ -2131,9 +2131,10 @@ def test_an_unreadable_action_record_does_not_lose_a_landed_mutation():
     from scf.app import main
 
     source = inspect.getsource(main._run_remediation)
-    assert 'elif isinstance(receipt.get("action"), dict):' in source, (
-        "a non-dict action must not reach a strict model"
-    )
+    # Any shape enters the branch. Guarding on dict-ness sent a truthy
+    # non-dict out of the if/elif entirely — no record, no audit entry, and not
+    # even the log that exists to notice it.
+    assert 'elif receipt.get("action") is not None:' in source
     assert "except ValidationError" in source[source.index('receipt["action"]'):]
     # And the mutation is recorded in the outcome BEFORE any bookkeeping runs,
     # so no later failure can produce a handover that says nothing changed.
@@ -2223,3 +2224,74 @@ def test_fail_never_settles_an_incident_silently():
     source = _stripped_source(main._fail_unguarded)
     assert "resting_state_unreachable" in source, "a no-op must be reported"
     assert "await _escalate(repo, incident_id, trace_id)" in source
+
+
+# --- Internal hostile review, round 4 ----------------------------------------
+
+
+def test_a_reconcilable_failure_is_never_closed():
+    """ESCALATED is terminal. A failure meaning "outcome unknown" must not reach it."""
+    from scf.app import main
+
+    source = _stripped_source(main._fail_unguarded)
+    branch = source[source.index("if not route and settled is not rule.resting_status"):]
+    assert "if settled in RECONCILABLE_STATES" in branch, (
+        "a reconcilable failure must stay reconcilable when its resting state "
+        "is unreachable, not be escalated terminally"
+    )
+    escalate_at = branch.index("_escalate(repo, incident_id, trace_id)")
+    guard_at = branch.index("if settled in RECONCILABLE_STATES")
+    assert guard_at < escalate_at, "the guard must come first"
+
+
+def test_no_route_ever_asserts_an_outcome_nobody_observed():
+    from scf.domain.enums import IncidentStatus as S
+    from scf.domain.state_machine import ASSERTION_STATES, TERMINAL_STATES, path_to
+
+    assert S.EXECUTION_FAILED in ASSERTION_STATES, (
+        "a failure state asserts an outcome exactly as a success state does"
+    )
+    for start in S:
+        if start in TERMINAL_STATES:
+            continue
+        route = path_to(start, S.ESCALATED, avoid=ASSERTION_STATES)
+        assert route, f"{start} has no route to ESCALATED"
+        assert not [x for x in route if x in ASSERTION_STATES and x is not S.ESCALATED]
+
+    # Abandoning a mutation in flight claims neither success nor failure.
+    assert path_to(S.EXECUTING, S.ESCALATED, avoid=ASSERTION_STATES) == (S.ESCALATED,)
+
+
+def test_a_malformed_action_of_any_shape_is_still_audited():
+    from scf.app import main
+
+    source = inspect.getsource(main._run_remediation)
+    branch = source[source.index('elif receipt.get("action") is not None:'):]
+    assert "action_record_unreadable" in branch
+    assert "append_audit" in branch, "the audit entry must be written regardless"
+    # And the payload must not index into a shape that may not be a mapping.
+    assert 'receipt["action"].get(' not in branch
+
+
+def test_the_recovery_path_records_a_landed_mutation_too():
+    from scf.app import main
+
+    source = inspect.getsource(main.reconcile_incident)
+    assert 'outcome["mutated_infrastructure"] = True' in source, (
+        "a handover built on this path must not claim nothing changed"
+    )
+
+
+def test_prefix_stripping_has_no_iteration_cliff():
+    """A count bound just moves the residue hole to count+1."""
+    from scf.tools import cloud_run_evidence
+    from scf.tools.cloud_run_evidence import body_is_healthy
+
+    assert not hasattr(cloud_run_evidence, "_MAX_PREFIX_STRIPS")
+    for guards in (1, 7, 8, 9, 25, 60):
+        body = ")]}'\n" * guards + '{"status":"UP"'
+        assert body_is_healthy(body) is False, f"{guards} guards"
+    # A complete body behind many guards is still read correctly, and a body
+    # made only of guards terminates.
+    assert body_is_healthy(")]}'\n" * 12 + '{"status":"UP"}') is True
+    assert body_is_healthy(")]}'\n" * 500) is False

@@ -165,10 +165,6 @@ _NEGATED_FAILURE = re.compile(
 #: inclusion. They are not part of the document and must not disguise it.
 _JSON_PREFIXES = (")]}'" + chr(10), ")]}'," + chr(10), ")]}'", "while(1);", "for(;;);")
 
-#: Bounded, because the loop consumes untrusted input: a body made entirely of
-#: guard strings must terminate the reader, not occupy it.
-_MAX_PREFIX_STRIPS = 8
-
 #: Keys a JSON health body might answer with. Checked in order.
 _HEALTH_KEYS = ("healthy", "ok", "ready", "serving", "status", "state")
 
@@ -343,12 +339,18 @@ def body_is_healthy(body: str) -> bool:
     # behind a proxy that prepends anything — a BOM, an XSSI guard — therefore
     # skipped the truncated-JSON guard entirely and fell into word matching,
     # which is exactly the half-delivered-response case that guard exists for.
-    # Until none remain, not once in tuple order. A single ordered pass left
+    # Until none remain — with no iteration count, deliberately. A count of 8
+    # simply moved the residue hole to nine layered guards, where a truncated
+    # body read as healthy again. The loop is already bounded without it: every
+    # iteration strictly shortens the string or breaks, and the string itself is
+    # bounded by the read limit above.
+    #
+    # Not once in tuple order, either. A single ordered pass left
     # residue for a BOM *behind* a guard string, for a guard repeated by two
     # layered proxies, and for guards arriving out of tuple order — and residue
     # means the body stops looking like JSON, which drops it into word matching:
     # the exact half-delivered-response case this guard exists to catch.
-    for _ in range(_MAX_PREFIX_STRIPS):
+    while True:
         stripped = text.lstrip("﻿").lstrip()
         for prefix in _JSON_PREFIXES:
             if stripped.startswith(prefix):

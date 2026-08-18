@@ -539,19 +539,38 @@ async def _fail_unguarded(
             (await run_in_threadpool(repo.get, incident_id))["status"]
         )
         if not route and settled is not rule.resting_status:
-            # No truthful route to the resting state. Doing nothing here would
-            # leave the incident wherever it happened to be, with nobody told —
-            # the silent strand this handler exists to prevent. Escalate to a
-            # person instead, and say why.
-            log_event(
-                "resting_state_unreachable",
-                severity="ERROR",
-                trace_id=trace_id,
-                incident_id=incident_id,
-                current=settled.value,
-                intended=rule.resting_status.value,
-            )
-            settled = IncidentStatus(await _escalate(repo, incident_id, trace_id))
+            # No truthful route to the intended resting state.
+            #
+            # Escalating here was wrong, and wrong in the direction that costs
+            # most: ESCALATED is terminal, so a RECONCILABLE failure — one whose
+            # whole meaning is "the outcome is unknown, keep the incident open"
+            # — got closed on a transient control-plane write error, and
+            # /reconcile refused it forever afterwards while the handover still
+            # said confirmation was in progress.
+            #
+            # Recoverability outranks reaching the nominal resting state. If the
+            # incident already sits somewhere reconciliation accepts, that is
+            # good enough and it stays there. Only a state nothing can pick up
+            # justifies closing it, and then a person is told.
+            if settled in RECONCILABLE_STATES:
+                log_event(
+                    "resting_state_unreachable_but_recoverable",
+                    severity="WARNING",
+                    trace_id=trace_id,
+                    incident_id=incident_id,
+                    current=settled.value,
+                    intended=rule.resting_status.value,
+                )
+            else:
+                log_event(
+                    "resting_state_unreachable",
+                    severity="ERROR",
+                    trace_id=trace_id,
+                    incident_id=incident_id,
+                    current=settled.value,
+                    intended=rule.resting_status.value,
+                )
+                settled = IncidentStatus(await _escalate(repo, incident_id, trace_id))
         outcome["awaiting_reconciliation"] = settled in RECONCILABLE_STATES
         outcome["final_status"] = settled.value
     else:
@@ -873,7 +892,7 @@ async def _run_remediation(
             actor_identity="sa-executor",
             trace_id=trace_id,
         )
-    elif isinstance(receipt.get("action"), dict):
+    elif receipt.get("action") is not None:
         # Record the action if it is recordable, and carry on if it is not.
         #
         # `action` was the one worker field handed to a strict model unguarded,
@@ -886,8 +905,16 @@ async def _run_remediation(
         #
         # The typed receipt above already established what happened. This is
         # record-keeping, and losing a record is not a reason to lose the site.
+        # Any shape at all, not just a dict. Guarding on `isinstance(..., dict)`
+        # sent a truthy non-dict — a JSON array, say — out of the branch
+        # entirely: no action record, no audit entry, and not even the
+        # unreadable-record log that exists to notice this. An incident could
+        # reach RESOLVED having mutated infrastructure with nothing in the audit
+        # trail saying any action was executed. Silence is the one outcome a
+        # malformed payload must never buy.
+        raw_action = receipt["action"]
         try:
-            action_record = ActionRecord.model_validate(receipt["action"])
+            action_record = ActionRecord.model_validate(raw_action)
         except ValidationError as exc:
             action_record = None
             log_event(
@@ -895,6 +922,7 @@ async def _run_remediation(
                 severity="ERROR",
                 trace_id=trace_id,
                 incident_id=incident_id,
+                action_type=type(raw_action).__name__,
                 error_count=exc.error_count(),
             )
         if action_record is not None:
@@ -905,10 +933,10 @@ async def _run_remediation(
             actor="executor",
             event="action_executed",
             payload={
-                "action_id": receipt["action"].get("action_id"),
+                "action_id": action_record.action_id if action_record else None,
                 "decision_id": policy_decision.decision_id,
                 "action_record_readable": action_record is not None,
-                "target_ref": receipt["action"].get("target_ref"),
+                "target_ref": action_record.target_ref if action_record else None,
                 "target_revision": receipt.get("target_revision"),
                 "accepted": reported.mutated,
                 "idempotency_key": receipt.get("idempotency_key"),
@@ -1347,6 +1375,13 @@ async def reconcile_incident(
             reconciled=reported.reconciled,
             state=reported.state,
         )
+        # The recovery path has to record this too. The primary path sets it
+        # before any bookkeeping can fail; leaving recovery out meant a handover
+        # produced here told the manager "No change was made to any service"
+        # about a mutation the executor had just reported as landed — and only
+        # an unreachable verifier was needed to reach that.
+        if reported.mutated:
+            outcome["mutated_infrastructure"] = True
 
         if status is IncidentStatus.EXECUTION_FAILED:
             # The incident never left the execution phase, because we could not

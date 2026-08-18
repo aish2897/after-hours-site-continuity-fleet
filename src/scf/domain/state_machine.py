@@ -39,7 +39,10 @@ LEGAL_TRANSITIONS: dict[IncidentStatus, frozenset[IncidentStatus]] = {
         {S.APPROVED, S.APPROVAL_DENIED, S.APPROVAL_EXPIRED, S.ESCALATED}
     ),
     S.APPROVED: frozenset({S.EXECUTING, S.ESCALATED}),
-    S.EXECUTING: frozenset({S.EXECUTED, S.EXECUTION_FAILED}),
+    # ESCALATED direct: abandoning an execution mid-flight should claim
+    # neither that it completed nor that it failed. Without this edge the only
+    # ways out both asserted an outcome nobody had observed.
+    S.EXECUTING: frozenset({S.EXECUTED, S.EXECUTION_FAILED, S.ESCALATED}),
     # ESCALATED direct, so abandoning a completed execution does not have to
     # claim verification began. The mutation landed; what failed was everything
     # after it, and the trail should say exactly that.
@@ -84,9 +87,13 @@ def assert_transition(current: IncidentStatus, target: IncidentStatus) -> None:
 #: States that assert something was done. Passing THROUGH one of these on the
 #: way somewhere else writes that assertion into the incident history, so a
 #: route that merely wants to reach a destination must not traverse them.
+#: EXECUTION_FAILED belongs here for the same reason EXECUTED does: it asserts
+#: an outcome. Leaving it out meant a route escalating from EXECUTING preferred
+#: it — recording that the mutation failed, in an incident whose own handover
+#: said the change had been applied.
 ASSERTION_STATES: frozenset[IncidentStatus] = frozenset(
-    {S.AUTO_ALLOWED, S.APPROVED, S.EXECUTING, S.EXECUTED, S.VERIFYING,
-     S.DENIED, S.APPROVAL_DENIED, S.APPROVAL_EXPIRED, S.RESOLVED}
+    {S.AUTO_ALLOWED, S.APPROVED, S.EXECUTING, S.EXECUTED, S.EXECUTION_FAILED,
+     S.VERIFYING, S.DENIED, S.APPROVAL_DENIED, S.APPROVAL_EXPIRED, S.RESOLVED}
 )
 
 
