@@ -80,7 +80,10 @@ recorded decision, not an omission.
 | `site-directory` | Cloud Run, unrelated service for IAM proof C | — |
 
 Investigators are stateless and never write Firestore. The orchestrator
-persists on their behalf. This is what turns `datastore.viewer` into a real
+persists on their behalf. `sa-agent-systems` holds no Firestore role at all,
+which is stronger than the read-only role earlier drafts named here. What
+follows was written about `datastore.viewer` and applies with more force to no
+role whatsoever: it is a real
 boundary instead of a naming convention.
 
 ## Regions and data handling
@@ -91,8 +94,10 @@ boundary instead of a naming convention.
 | Model Armor inspection *(PLANNED)* | Melbourne `australia-southeast2` | No Sydney region; nearest Australian region |
 | Gemini 3.7 Flash inference | `global` | No Australian inference endpoint published |
 
-Model Armor is not offered in Sydney, so security inspection makes a deliberate
-Sydney → Melbourne hop. That leg is entirely within Australia.
+Model Armor is **PLANNED and not integrated**. It is not offered in Sydney, so
+the intended design would make a deliberate Sydney → Melbourne hop for security
+inspection — a leg entirely within Australia. No such inspection happens today,
+and nothing in the running system depends on it.
 
 Model inference is not. Gemini 3.7 Flash publishes inference endpoints for
 `global`, `us`, and `eu` only; a real call to the Sydney regional endpoint

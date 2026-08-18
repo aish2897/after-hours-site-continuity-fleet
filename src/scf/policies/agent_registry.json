@@ -1,6 +1,6 @@
 {
   "registry_version": "1.0.0",
-  "description": "Runtime registry. Loaded at startup and used to gate tool dispatch. The in-process check is defence in depth only; the authoritative boundary is Google IAM at the Cloud Run service level. `llm_backed` describes what the runtime actually does today, not what the contract permits: the Systems Investigator's evidence and proposal are deterministic, so it is false. `may_propose_actions` remains a capability statement.",
+  "description": "Runtime registry. Loaded at startup and used to gate tool dispatch. The in-process check is defence in depth only; the authoritative boundary is Google IAM at the Cloud Run service level. `llm_backed` describes what the runtime actually does today, not what the contract permits: the Systems Investigator's evidence and proposal are deterministic, so it is false. `deployed` says whether a runtime exists at all \u2014 network, security and continuity are contracts only, with no service and no service account, so their `llm_backed: false` means 'no runtime', not 'deterministic runtime'. `may_propose_actions` remains a capability statement.",
   "agents": {
     "orchestrator": {
       "version": "1.0.0",
@@ -13,7 +13,8 @@
         "route_specialists",
         "request_policy_decision",
         "request_execution"
-      ]
+      ],
+      "deployed": true
     },
     "systems": {
       "version": "1.0.0",
@@ -24,40 +25,44 @@
       "allowed_tools": [
         "read_service_health",
         "read_revision_history"
-      ]
+      ],
+      "deployed": true
     },
     "network": {
       "version": "1.0.0",
-      "llm_backed": true,
+      "llm_backed": false,
       "service_account": "sa-agent-network",
       "may_propose_actions": true,
       "may_write_firestore": false,
       "allowed_tools": [
         "read_network_status",
         "read_dns_status"
-      ]
+      ],
+      "deployed": false
     },
     "security": {
       "version": "1.0.0",
-      "llm_backed": true,
+      "llm_backed": false,
       "service_account": "sa-agent-security",
       "may_propose_actions": false,
       "may_write_firestore": false,
       "allowed_tools": [
         "read_security_events",
         "classify_untrusted_content"
-      ]
+      ],
+      "deployed": false
     },
     "continuity": {
       "version": "1.0.0",
-      "llm_backed": true,
+      "llm_backed": false,
       "service_account": "sa-agent-continuity",
       "may_propose_actions": false,
       "may_write_firestore": false,
       "allowed_tools": [
         "compose_status_update",
         "assemble_escalation_package"
-      ]
+      ],
+      "deployed": false
     },
     "executor": {
       "version": "1.0.0",
@@ -67,7 +72,8 @@
       "may_write_firestore": true,
       "allowed_tools": [
         "flip_traffic_to_last_good"
-      ]
+      ],
+      "deployed": true
     },
     "verifier": {
       "version": "1.0.0",
@@ -77,7 +83,8 @@
       "may_write_firestore": false,
       "allowed_tools": [
         "read_service_health"
-      ]
+      ],
+      "deployed": true
     }
   }
 }

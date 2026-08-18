@@ -12,9 +12,11 @@ from scf.policy.loader import ActionPolicy, default_policy
 def trusted_evidence_map(evidence: Iterable[Evidence]) -> dict[str, Any]:
     """Collapse evidence to a key/value map, discarding untrusted input.
 
-    This is the structural prompt-injection defence: content that originated
-    from a user report, attachment, or vendor message never reaches the
-    authorization path, so it cannot satisfy a required-evidence condition.
+    This is the structural separation that keeps injected content out of the
+    *authorization* path: content originating from a user report, attachment or
+    vendor message cannot satisfy a required-evidence condition. It is
+    deliberately not called prompt-injection resistance — the report text still
+    reaches the model uninspected, and no such resistance is claimed anywhere.
     """
     return {
         item.key: item.value

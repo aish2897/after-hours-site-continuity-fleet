@@ -232,7 +232,14 @@ EXECUTION_FAILURE_CATEGORIES: dict[str, FailureCategory] = {
     "CONCURRENT_MODIFICATION": FailureCategory.EXECUTION_CONFLICT,
     "STALE_EVIDENCE": FailureCategory.STALE_EVIDENCE,
     "TARGET_NO_LONGER_HEALTHY": FailureCategory.TARGET_NO_LONGER_HEALTHY,
-    "MUTATION_DID_NOT_HOLD": FailureCategory.STALE_EVIDENCE,
+    # NOT StaleEvidence. The executor's own detail says "this execution may
+    # already have issued its mutation" and that it stays recoverable — mapping
+    # that to STALE_EVIDENCE (terminal, not reconcilable) closed the incident on
+    # a claim nobody could support, and told the manager "Nothing was changed"
+    # about a mutation that may well have landed. A Cloud Run traffic migration
+    # is asynchronous, so an observation taken moments after our own write can
+    # legitimately still show the old revision.
+    "MUTATION_DID_NOT_HOLD": FailureCategory.EXECUTION_OUTCOME_UNKNOWN,
     # Issued, and Google answered with something that is not proof either way.
     "MUTATION_OUTCOME_UNKNOWN": FailureCategory.EXECUTION_OUTCOME_UNKNOWN,
 }
@@ -318,8 +325,12 @@ async def _escalate(
 #: investigator. Each is comfortably above the healthy path's real duration
 #: (investigator ~4 s, executor ~5 s) and well below any human's patience.
 #: The verifier's is larger because it deliberately polls a settle window.
+#: The caller's bound must sit ABOVE the worker's own deadline, or the worker's
+#: budget never gets to fire: the call is abandoned first and a clean, truthful
+#: `WORKER_BUDGET_EXCEEDED` contract is replaced by a bare timeout that says
+#: nothing about what the worker managed to learn.
 CALL_TIMEOUTS: dict[str, float] = {
-    "investigator": float(os.environ.get("SCF_INVESTIGATOR_TIMEOUT", "45")),
+    "investigator": float(os.environ.get("SCF_INVESTIGATOR_TIMEOUT", "60")),
     "executor": float(os.environ.get("SCF_EXECUTOR_TIMEOUT", "120")),
     "verifier": float(os.environ.get("SCF_VERIFIER_TIMEOUT", "150")),
 }
@@ -370,8 +381,15 @@ async def _call(
         )
     try:
         body = response.json()
-    except ValueError as exc:
-        raise DownstreamFailure(service, "malformed_response", str(exc)) from exc
+    except (ValueError, RecursionError) as exc:
+        # RecursionError, deliberately. `json.loads` raises it — NOT ValueError —
+        # on a deeply nested payload, so a worker answering 200 with
+        # `"["*100000` escaped every typed failure path in this module. On the
+        # primary path the workflow's catch-all still escalated it; on the
+        # RECOVERY path there was no catch-all, so the incident stranded at
+        # VERIFYING, which is neither terminal nor reconcilable. The endpoint
+        # that exists to rescue incidents was the one that could lose them.
+        raise DownstreamFailure(service, "malformed_response", type(exc).__name__) from exc
     if not isinstance(body, dict):
         # A worker may be authenticated, return 200, and still hand back a list,
         # a string or null. Every caller downstream treats this as a mapping, so
@@ -810,7 +828,17 @@ async def _run_remediation(
     if reported.mutated:
         outcome["mutated_infrastructure"] = True
 
-    if not reported.progressed():
+    if not (reported.progressed() or _execution_already_landed(receipt)):
+        # `_execution_already_landed` belongs on BOTH paths, not just recovery.
+        # A duplicate-suppressed receipt reports `mutated: False` because *this
+        # call* changed nothing — but the execution it collided with is at
+        # MUTATED, so the authorized traffic flip has in fact landed. Reading
+        # only `progressed()` closed such an incident as REMEDIATION_FAILED,
+        # which is terminal and not reconcilable: the site was back up and the
+        # duty manager was told the repair had failed, with no route to correct
+        # it. That happens whenever a second orchestrator instance, an ingress
+        # retry, or a worker that outlived its caller reaches the executor
+        # first — not a rare race, and the worst error this system can make.
         await run_in_threadpool(
             repo.transition, incident_id, IncidentStatus.EXECUTION_FAILED, trace_id=trace_id
         )
@@ -1273,6 +1301,30 @@ async def reconcile_incident(
         outcome["final_status"] = (await run_in_threadpool(repo.get, incident_id))[
             "status"
         ]
+    except Exception as exc:  # noqa: BLE001 - recovery must not lose an incident
+        # The same catch-all the primary path has, for the same reason, and
+        # more urgently: this handler moves the incident to VERIFYING before
+        # calling out, and VERIFYING is neither terminal nor reconcilable. An
+        # exception escaping here left the incident in a state no endpoint
+        # would ever pick up again — the recovery path losing the very incident
+        # it was invoked to rescue.
+        log_event(
+            "reconcile_unexpected_error",
+            severity="ERROR",
+            trace_id=trace_id,
+            incident_id=incident_id,
+            error_type=type(exc).__name__,
+        )
+        outcome = await _fail(
+            repo,
+            incident_id,
+            WorkflowFailure(
+                FailureCategory.VERIFIER_UNAVAILABLE,
+                f"reconciliation could not complete ({type(exc).__name__})",
+            ),
+            trace_id,
+            outcome,
+        )
 
     final = await run_in_threadpool(repo.get, incident_id)
     outcome["incident_id"] = incident_id

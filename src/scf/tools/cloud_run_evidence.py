@@ -25,6 +25,13 @@ from scf.domain.models import Evidence, Proposal
 RUN_API = "https://run.googleapis.com/v2"
 AGENT = "systems"
 
+#: Client timeout for one Cloud Run Admin read and one health probe. Exported
+#: so a caller's work budget can be derived from what the work actually costs
+#: rather than guessed — a deadline smaller than its own worst case aborts the
+#: investigation on exactly the slow outage it exists to diagnose.
+ADMIN_CALL_TIMEOUT = 10.0
+PROBE_TIMEOUT = 8.0
+
 
 def _access_token() -> str:
     credentials, _ = google.auth.default(
@@ -45,7 +52,7 @@ def describe_service(service: str) -> dict[str, Any]:
     response = httpx.get(
         f"{RUN_API}/{_service_path(service)}",
         headers={"Authorization": f"Bearer {_access_token()}"},
-        timeout=10.0,
+        timeout=ADMIN_CALL_TIMEOUT,
     )
     response.raise_for_status()
     return response.json()
@@ -55,7 +62,7 @@ def list_revisions(service: str) -> list[dict[str, Any]]:
     response = httpx.get(
         f"{RUN_API}/{_service_path(service)}/revisions",
         headers={"Authorization": f"Bearer {_access_token()}"},
-        timeout=10.0,
+        timeout=ADMIN_CALL_TIMEOUT,
     )
     response.raise_for_status()
     return response.json().get("revisions", [])
@@ -100,7 +107,12 @@ _HEALTHY_MARKERS = frozenset(
 #: read as healthy on the strength of one word.
 _UNHEALTHY_WORDS = frozenset(
     {"unhealthy", "unavailable", "degraded", "failing", "failed", "failure",
-     "fail", "down", "false"}
+     "fail", "down", "false",
+     # Lifecycle words. `{"status": "starting up"}` is a container answering 200
+     # before it can serve; reading it as healthy off `up` is how a revision
+     # that is not ready yet gets graded RECOVERED.
+     "starting", "stopping", "terminating", "draining", "initializing",
+     "warming", "pending"}
 )
 #: Phrases that negate a positive marker and cannot be caught word-by-word.
 #: Derived from the markers themselves rather than listed by hand: the list was
@@ -108,6 +120,22 @@ _UNHEALTHY_WORDS = frozenset(
 #: `{"status": "not up"}` then read as healthy off the word `up` — a service
 #: reporting its own failure, taken as a report that it was fine.
 _UNHEALTHY_PHRASES = tuple(f"not {marker}" for marker in sorted(_HEALTHY_MARKERS))
+#: ...and matched as WORDS. Plain substring containment made `cannot upload` and
+#: `cannot upgrade` contain "not up", so an ordinary sentence in a healthy
+#: body — "cannot upload logs" — reported the service as unhealthy. That is the
+#: one direction this predicate must never fail in: a healthy production
+#: revision reading as broken is what triggers an unwarranted rollback of a
+#: service nobody asked us to touch.
+#:
+#: Up to two words may sit between the negator and the marker. Requiring them
+#: adjacent meant `not yet ready`, `not currently available` and `not fully up`
+#: all read as HEALTHY off the marker word alone — ordinary readiness bodies
+#: from a container that is answering 200 while it is still starting.
+_NEGATED_MARKER = re.compile(
+    "(?<![a-z])(?:not|never) +(?:[a-z]+ +){0,2}?(?:"
+    + "|".join(sorted(_HEALTHY_MARKERS, key=len, reverse=True))
+    + ")(?![a-z])"
+)
 
 #: A negated failure word is not a failure report. `"message": "no failure
 #: detected"` is a service saying it is fine, and reading it as a failure
@@ -189,11 +217,19 @@ def _collect_health_verdicts(payload: Any, depth: int = 0) -> list[bool]:
         # anywhere that reports failure vetoes the body. Only values are read,
         # never key names, so a healthy body carrying `"failure_count": 0` — a
         # number, under a name that merely contains the word — is unaffected.
-        return [False] if _text_says_unhealthy(payload.strip().lower()) else []
+        return [False] if _value_reports_failure(payload) else []
     if isinstance(payload, dict):
         # A health key that contradicted itself is a contradiction, whichever
         # value the parser happened to keep.
-        if any(key in _HEALTH_KEYS for key in payload.get(_CONFLICT_KEY, ())):
+        declared_conflicts = payload.get(_CONFLICT_KEY, ())
+        if not isinstance(declared_conflicts, (list, tuple)):
+            # The body supplied our own sentinel key with a value we did not
+            # write. Iterating it raised TypeError straight out of the reader —
+            # a probed service crashing the investigator or verifier, which is
+            # exactly what this function's bounds exist to prevent. A body
+            # carrying this key is not a health answer.
+            return [False]
+        if any(key in _HEALTH_KEYS for key in declared_conflicts):
             verdicts.append(False)
         for key, value in payload.items():
             if key == _CONFLICT_KEY:
@@ -223,9 +259,36 @@ def _collect_health_verdicts(payload: Any, depth: int = 0) -> list[bool]:
     return verdicts
 
 
+#: Values that carry a failure word without reporting a failure. A hostname
+#: like `web-down-under-01` and a stringified boolean like `"false"` are not
+#: health statements, and vetoing on them blocked a genuinely recovered service
+#: from ever being verified — which escalates healthy infrastructure
+#: permanently, with no route back.
+_IDENTIFIER_SHAPED = re.compile(r"[0-9]|[-_./]")
+_BARE_LITERALS = frozenset({"true", "false", "null", "none", "0", "1"})
+
+
+def _value_reports_failure(value: str) -> bool:
+    """Whether a non-health-key string VALUE is reporting a failure.
+
+    Only a WHOLE value that is a bare literal or a single identifier-shaped
+    token is excused. Excusing any value that merely *contains* a digit was too
+    broad by far: it let `{"checks": ["0: failed"]}` through as healthy, which
+    is an indexed failure report and precisely the defect an earlier round
+    closed. A failure word sitting in a sentence is still a failure word.
+    """
+    stripped = value.strip().lower()
+    if stripped in _BARE_LITERALS:
+        return False
+    if not stripped.split()[1:] and _IDENTIFIER_SHAPED.search(stripped):
+        # One token, shaped like a hostname, build tag or resource id.
+        return False
+    return _text_says_unhealthy(stripped)
+
+
 def _text_says_unhealthy(text: str) -> bool:
     """Whether a plain string reports a failure, as whole words and phrases."""
-    if any(phrase in text for phrase in _UNHEALTHY_PHRASES):
+    if _NEGATED_MARKER.search(text):
         return True
     return bool(set(re.findall(r"[a-z]+", _NEGATED_FAILURE.sub(" ", text))) & _UNHEALTHY_WORDS)
 
@@ -234,7 +297,7 @@ def _text_is_healthy(text: str) -> bool:
     """Word-level reading of a plain-text health body."""
     if not text:
         return False
-    if any(phrase in text for phrase in _UNHEALTHY_PHRASES):
+    if _NEGATED_MARKER.search(text):
         return False
     words = set(re.findall(r"[a-z]+", _NEGATED_FAILURE.sub(" ", text)))
     if words & _UNHEALTHY_WORDS:
@@ -311,7 +374,13 @@ def body_is_healthy(body: str) -> bool:
 
 
 def probe(url: str) -> tuple[int, bool, str]:
-    """(status, healthy, body) for a read-only probe. One place, one rule."""
+    """(status, healthy, body) for a read-only probe. One place, one rule.
+
+    Every caller that decides whether a service is up goes through this, so the
+    rule "HTTP 200 **and** a body that says so" exists once. It was previously
+    declared and then never called, while five sites open-coded the same
+    conjunction — which meant a defect in the rule had to be fixed five times.
+    """
     status_code, body = probe_health(url)
     return status_code, status_code == 200 and body_is_healthy(body), body
 
@@ -325,12 +394,20 @@ def probe_health(url: str) -> tuple[int, str]:
     would have materialised all of it into the investigator's memory before
     anything got the chance to reject it.
 
-    One byte past the bound is kept deliberately: it is what makes the
-    truncation visible to `body_is_healthy`, which then fails closed instead of
-    reading a fragment as if it were the whole answer.
+    A truncated read returns a fixed marker string rather than the fragment.
+    The previous approach — keep one byte past the bound and let the length
+    check notice — did not survive contact with reality: `.strip()` removed the
+    sentinel byte whenever the body ended in whitespace, and a multi-byte body
+    decoded to roughly half its byte count, so 128 KiB of two-byte characters
+    arrived as 32 769 characters and sailed under a 65 536-character bound. The
+    fragment was then word-matched, and a large error dump whose failure words
+    happened to fall past the cut read as healthy. Signalling truncation
+    explicitly cannot be undone by decoding.
     """
     try:
-        with httpx.stream("GET", url, timeout=10.0, follow_redirects=True) as response:
+        with httpx.stream(
+            "GET", url, timeout=PROBE_TIMEOUT, follow_redirects=True
+        ) as response:
             chunks: list[bytes] = []
             read = 0
             for chunk in response.iter_bytes(chunk_size=READ_CHUNK_BYTES):
@@ -338,8 +415,12 @@ def probe_health(url: str) -> tuple[int, str]:
                 read += len(chunk)
                 if read > MAX_HEALTH_BODY_BYTES:
                     break
-            raw = b"".join(chunks)[: MAX_HEALTH_BODY_BYTES + 1]
-            return response.status_code, raw.decode("utf-8", "replace").strip()
+            if read > MAX_HEALTH_BODY_BYTES:
+                return response.status_code, TRUNCATED_BODY
+            return (
+                response.status_code,
+                b"".join(chunks).decode("utf-8", "replace").strip(),
+            )
     except httpx.HTTPError as exc:
         return 0, f"unreachable: {type(exc).__name__}"
 
@@ -367,8 +448,26 @@ MAX_HEALTH_DEPTH = 20
 #: defect as buffering, arriving one chunk later.
 READ_CHUNK_BYTES = 8 * 1024
 
+#: What a probe returns instead of an oversized body. Deliberately contains no
+#: health marker, so every reader of it fails closed without needing to know
+#: that truncation is a special case.
+TRUNCATED_BODY = "unreadable: health response exceeded the readable bound"
+
 #: A failing probe is confirmed once before it counts as evidence.
 CONFIRM_UNHEALTHY_AFTER_SECONDS = 3.0
+
+#: Worst-case wall time for one `gather_evidence`: the service description, the
+#: live probe, the confirming sleep, the second live probe, and the candidate
+#: probe. Derived rather than written down, so it cannot drift away from the
+#: timeouts above the way the investigator's 30s deadline drifted away from the
+#: 43s of work it was supposed to bound.
+GATHER_EVIDENCE_WORST_CASE_SECONDS = (
+    ADMIN_CALL_TIMEOUT
+    + PROBE_TIMEOUT
+    + CONFIRM_UNHEALTHY_AFTER_SECONDS
+    + PROBE_TIMEOUT
+    + PROBE_TIMEOUT
+)
 
 KNOWN_GOOD_TAG = "known-good"
 

@@ -1,8 +1,9 @@
 # After-Hours Site Continuity Fleet
 
 A secure autonomous multi-agent system that lets a non-technical duty manager
-recover a distributed business site when an incident spans network, systems,
-identity, and external vendors.
+recover a distributed business site when an incident could belong to network,
+systems, identity, or an external vendor — routing to the specialist that is
+actually needed, rather than asking the manager to work out which one it is.
 
 Built for the All Things Agentic Hackathon, Fortified Enterprise Fleet track.
 

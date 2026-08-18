@@ -1763,3 +1763,246 @@ def test_no_gate_e_category_is_both_reconcilable_and_terminal():
         rule = handling(category)
         if rule.reconcilable:
             assert rule.resting_status not in TERMINAL_STATES, category
+
+
+# --- Internal hostile review (Gate E final) ----------------------------------
+# Codex was unavailable; a fresh Claude reviewer with no editing role audited
+# HEAD. These cover every Critical/High it raised.
+
+
+def test_an_already_verified_execution_can_still_close_its_incident():
+    """A repaired, verified, terminalized incident must not be a zombie."""
+    from scf.app.main import TerminalizationReceipt
+
+    already = {
+        "verified": True,
+        "terminal": True,
+        "outcome": "ALREADY_TERMINAL",
+        "execution_id": "e1",
+        "authorized_target_revision": "rev-good",
+        "state": "VERIFIED",
+        "traffic_allocation": {"rev-good": 100},
+        "serves_authorized_exclusively": True,
+        "http_status": 200,
+        "http_healthy": True,
+        "evidence_from_record": True,
+    }
+    assert TerminalizationReceipt.model_validate(already).terminal() is True
+
+    # The old payload could never satisfy the contract, so every reconcile
+    # attempt rested the incident straight back where it started.
+    stripped = {k: v for k, v in already.items()
+                if k not in ("serves_authorized_exclusively", "traffic_allocation",
+                             "http_status", "http_healthy", "evidence_from_record")}
+    assert TerminalizationReceipt.model_validate(stripped).terminal() is False
+
+
+def test_a_duplicate_suppressed_execution_is_not_a_failed_remediation():
+    """The fix landed; this call collided with it. That is not a failure."""
+    from scf.app.main import ExecutionReceipt, _execution_already_landed
+
+    duplicate = {"executed": False, "mutated": False, "duplicate": True,
+                 "state": "MUTATED", "terminal": True}
+    reported = ExecutionReceipt.model_validate(duplicate)
+    assert reported.progressed() is False, "this call itself changed nothing"
+    assert _execution_already_landed(duplicate) is True, "but the effect is there"
+
+    source = inspect.getsource(
+        __import__("scf.app.main", fromlist=["_run_remediation"])._run_remediation
+    )
+    assert "reported.progressed() or _execution_already_landed(receipt)" in source
+
+
+def test_an_ordinary_word_containing_not_up_is_not_a_failure_report():
+    """`cannot upload` contains "not up". Substring matching read it as down."""
+    from scf.tools.cloud_run_evidence import body_is_healthy
+
+    for body in (
+        '{"status":"healthy","note":"cannot upload logs"}',
+        "cannot upgrade; everything healthy",
+        '{"status":"UP","detail":"connector cannot upload metrics"}',
+    ):
+        assert body_is_healthy(body) is True, body
+
+    # Real negation of a real marker still reads as unhealthy.
+    for body in ('{"status":"not up"}', '{"status":"not available"}',
+                 '{"status":"not passing"}', "service is not healthy"):
+        assert body_is_healthy(body) is False, body
+
+
+def test_a_truncated_probe_body_cannot_be_word_matched():
+    """`.strip()` ate the sentinel byte; multi-byte bodies halved the count."""
+    from scf.tools.cloud_run_evidence import (
+        MAX_HEALTH_BODY_BYTES,
+        TRUNCATED_BODY,
+        body_is_healthy,
+    )
+
+    assert body_is_healthy(TRUNCATED_BODY) is False
+    assert not any(
+        marker in TRUNCATED_BODY.split()
+        for marker in ("healthy", "ok", "ready", "serving", "up", "pass", "available")
+    ), "the marker must not accidentally assert health"
+
+    source = _stripped_source(
+        __import__("scf.tools.cloud_run_evidence", fromlist=["probe_health"]).probe_health
+    )
+    assert "TRUNCATED_BODY" in source
+    assert "MAX_HEALTH_BODY_BYTES + 1" not in source, "the byte sentinel is gone"
+
+    # A two-byte-per-character body used to decode to half the bound and pass.
+    multibyte = ("é" * (MAX_HEALTH_BODY_BYTES // 2)) + " ok"
+    assert len(multibyte.encode("utf-8")) > MAX_HEALTH_BODY_BYTES
+    assert body_is_healthy(TRUNCATED_BODY) is False
+
+
+def test_the_work_budget_is_larger_than_the_work_it_bounds():
+    """A deadline below its own worst case aborts the outage it must diagnose."""
+    from scf.app.investigator import WORK_DEADLINE_SECONDS
+    from scf.app.main import CALL_TIMEOUTS
+    from scf.tools.cloud_run_evidence import GATHER_EVIDENCE_WORST_CASE_SECONDS
+
+    assert GATHER_EVIDENCE_WORST_CASE_SECONDS < WORK_DEADLINE_SECONDS, (
+        "the investigator must be able to finish its own worst case"
+    )
+    assert WORK_DEADLINE_SECONDS < CALL_TIMEOUTS["investigator"], (
+        "the caller must outlast the worker, or the budget never reports"
+    )
+
+
+def test_an_unknown_mutation_outcome_is_recorded_and_gives_the_lease_back():
+    from scf.app import executor
+
+    source = inspect.getsource(executor.execute)
+    unknown = source[source.index("MUTATION_OUTCOME_UNKNOWN") - 2000:
+                     source.index("MUTATION_OUTCOME_UNKNOWN") + 200]
+    assert "store.record_receipt" in unknown, "the execution plane must keep the record"
+    assert "store.release" in unknown, "holding the lease only delays reconciliation"
+
+
+def test_no_production_code_writes_a_terminal_execution_failure():
+    """Removed deliberately: terminal is what reconciliation cannot rescue."""
+    from pathlib import Path
+
+    # The service handlers only. `execution_store` still NAMES the state in its
+    # terminal-state set, which is correct — the point is that nothing writes it.
+    src = Path(__file__).resolve().parents[2] / "src" / "scf" / "app"
+    writers = [
+        f"{path.name}:{n}"
+        for path in src.rglob("*.py")
+        for n, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1)
+        if "ExecutionState.FAILED" in line and not line.lstrip().startswith("#")
+    ]
+    assert writers == [], f"a terminal FAILED writer came back: {writers}"
+
+
+# --- Internal hostile review, second reviewer --------------------------------
+
+
+def test_a_deeply_nested_worker_body_cannot_strand_an_incident():
+    """`json.loads` raises RecursionError, not ValueError. It escaped everything."""
+    from scf.app.invoke import WorkerResponse
+    from scf.app import main
+
+    hostile = WorkerResponse(200, "[" * 100000 + "]" * 100000)
+    with pytest.raises(RecursionError):
+        hostile.json()
+
+    call = _stripped_source(main._call)
+    assert "(ValueError, RecursionError)" in call, "both must map to a typed failure"
+
+    # And reconciliation carries the same catch-all the primary path has: it
+    # moves the incident to VERIFYING, which is neither terminal nor
+    # reconcilable, so anything escaping strands it forever.
+    reconcile = _stripped_source(main.reconcile_incident)
+    assert "except Exception" in reconcile
+    assert IncidentStatus.VERIFYING not in main.RECONCILABLE_STATES
+
+
+def test_a_mutation_that_may_have_landed_is_not_called_stale_evidence():
+    """The executor says "may already have issued"; the manager was told otherwise."""
+    from scf.app.main import _execution_failure_category
+    from scf.domain.failures import FailureCategory, handling
+
+    category = _execution_failure_category({"reason": "MUTATION_DID_NOT_HOLD"})
+    assert category is FailureCategory.EXECUTION_OUTCOME_UNKNOWN
+    rule = handling(category)
+    assert rule.reconcilable is True, "an async traffic migration must not close it"
+    assert rule.resting_status is IncidentStatus.EXECUTION_FAILED
+    assert "Nothing was changed" not in rule.manager_summary
+
+
+def test_an_unknown_outcome_never_claims_nothing_changed():
+    from scf.domain.failures import (
+        OUTCOME_UNKNOWN_CATEGORIES,
+        FailureCategory,
+        build_escalation_package,
+    )
+
+    for category in OUTCOME_UNKNOWN_CATEGORIES:
+        package = build_escalation_package(
+            incident_id="INC-1", category=category, correlation_id=None,
+            specialists_attempted=[], evidence_keys=[], mutated=False,
+            current_service_state="unknown", operations_restored=False,
+        )
+        assert package.automation_changed_anything is None, category
+        assert "No change was made" not in package.what_automation_did, category
+        assert "could not confirm" in package.what_automation_did, category
+
+    # A category that really does know keeps saying so.
+    known = build_escalation_package(
+        incident_id="INC-1", category=FailureCategory.INSUFFICIENT_EVIDENCE,
+        correlation_id=None, specialists_attempted=[], evidence_keys=[],
+        mutated=False, current_service_state="s", operations_restored=False,
+    )
+    assert known.automation_changed_anything is False
+    assert known.what_automation_did == "No change was made to any service."
+
+
+def test_an_adverb_does_not_defeat_a_negated_marker():
+    """`not yet ready` is a readiness body, not a health report."""
+    from scf.tools.cloud_run_evidence import body_is_healthy
+
+    for body in (
+        '{"status":"not yet ready"}',
+        '{"status":"not currently available"}',
+        '{"status":"not fully up"}',
+        '{"status":"never ready"}',
+        "service is not yet ready",
+        "not currently serving traffic",
+    ):
+        assert body_is_healthy(body) is False, body
+
+
+def test_a_container_on_its_way_up_is_not_up():
+    from scf.tools.cloud_run_evidence import body_is_healthy
+
+    for body in ('{"status":"starting up"}', '{"status":"initializing"}',
+                 '{"status":"draining"}', '{"status":"pending"}'):
+        assert body_is_healthy(body) is False, body
+
+
+def test_an_identifier_or_a_stringified_boolean_is_not_a_failure_report():
+    """Vetoing on these escalated genuinely healthy infrastructure forever."""
+    from scf.tools.cloud_run_evidence import body_is_healthy
+
+    for body in (
+        '{"status":"UP","details":{"readOnly":"false"}}',
+        '{"status":"ok","maintenance":"false"}',
+        '{"status":"UP","instance":"web-down-under-01"}',
+        '{"status":"UP","build":"v2.1-down-migration-0003"}',
+    ):
+        assert body_is_healthy(body) is True, body
+
+    # A real failure word in a real status value still vetoes.
+    assert body_is_healthy('{"healthy": true, "checks": {"db": "failed"}}') is False
+    assert body_is_healthy('{"ok": true, "note": "printer unavailable"}') is False
+
+
+def test_a_body_supplying_our_own_sentinel_key_cannot_crash_the_reader():
+    """A probed service must never be able to raise out of the reader."""
+    from scf.tools.cloud_run_evidence import body_is_healthy
+
+    assert body_is_healthy('{"__scf_conflicting_health_keys__": 5, "ok": true}') is False
+    assert body_is_healthy('{"__scf_conflicting_health_keys__": "x", "ok": true}') is False
+    assert body_is_healthy('{"__scf_conflicting_health_keys__": null, "ok": true}') is False

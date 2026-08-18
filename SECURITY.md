@@ -56,8 +56,10 @@ The in-code tool allowlist in `policies/agent_registry.json` is defence in
 depth only.
 
 Investigators are stateless and never write Firestore; the orchestrator
-persists on their behalf. That is what makes `datastore.viewer` a real,
-demonstrable boundary rather than a convention.
+persists on their behalf. `sa-agent-systems` holds **no Firestore role at all**
+— not even read. The investigator cannot reach Firestore to be trusted or
+distrusted, which is a stronger boundary than the read-only role earlier drafts
+of this file credited it with.
 
 The Remediation Executor holds a custom role, `scfRemediator`, bound **only on
 the `dispatch-web` service resource**. A fully compromised executor still
@@ -98,9 +100,10 @@ Stated plainly rather than implied away.
    through an Australian regional inference endpoint — Sydney returns
    `404 NOT_FOUND` for the publisher model, confirmed by a real call
    (`docs/evidence/gate-a-vertex-gemini.md`). Inference therefore uses Vertex
-   AI's `global` endpoint. Model Armor inspection additionally crosses from
-   Sydney to Melbourne, though that leg stays within Australia. See the data
-   handling section below.
+   AI's `global` endpoint. Model Armor is **PLANNED and not integrated**: the
+   intended design would inspect untrusted content in Melbourne
+   `australia-southeast2`, a leg that would stay within Australia, but no
+   inspection happens today. See the data handling section below.
 4. **Audit is tamper-evident, not immutable.** The chain detects edits, but a
    compromised authoritative writer could rewrite a record and the incident's
    `audit_tail_hash` together. Detecting that needs an external witness we do

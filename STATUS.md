@@ -73,18 +73,23 @@ Real execution proof exists in `docs/evidence/`.
   issue another, so an operator's deliberate rollback is never overwritten. A
   409 ABORTED is proof nothing was applied, so the record is wound back and the
   incident stays reconcilable rather than being closed on a call that changed
-  nothing. If the rewind is itself fenced, the execution stays marked as
+  nothing. (The fenced-rewind ordering below is contract-tested offline; it has
+  not been produced live, because Google has never refused a rewind here.) If
+  the rewind is itself fenced, the execution stays marked as
   attempted and the incident escalates.**
 
-- **Fourteen fault scenarios, run end to end against the deployed fleet. Six
+- **Sixteen fault scenarios, run end to end against the deployed fleet. Nine
   are failures produced by Google infrastructure itself: investigator timeout,
   investigator 503, executor 503, verifier 503, a real 409 ABORTED on the
-  Cloud Run traffic write, and a real candidate probe. The other eight are
-  controlled payloads driven through the real parser, the real policy gate and
-  the real caller: malformed model output (x3), hallucinated privileged
-  action, action outside the closed enum, runaway worker loop, insufficient
-  evidence, and a malformed authenticated worker payload. No scenario produced
-  more than one infrastructure change.**
+  Cloud Run traffic write, a real candidate probe, a real healthy system
+  declining to act, a caller losing a surviving executor, and the final
+  autonomous recovery. The other seven are controlled payloads driven through
+  the real parser, the real policy gate and the real caller: malformed model
+  output (x3), hallucinated privileged action, action outside the closed enum,
+  runaway worker loop, a malformed authenticated worker payload, a
+  truthy-string `budget_exceeded`, and an empty `proposal: {}`. The live proof
+  matrix in the Gate E evidence is the single source for this split. No
+  scenario produced more than one infrastructure change.**
 - **Closed failure taxonomy: 15 categories, one table fixing resting state,
   reconcilability, retry eligibility, audit event and manager summary**
 - **Deterministic escalation package: plain-language impact, what automation

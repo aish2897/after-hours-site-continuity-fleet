@@ -390,7 +390,7 @@ never "try the same thing again". What follows is *reconciliation*: observe
 real infrastructure, act only if reality proves it is still needed. It is
 logged as `reconciliation_execution`, distinctly from any execution attempt.
 
-Across all fourteen fault scenarios, **no scenario produced more than one
+Across all sixteen fault scenarios, **no scenario produced more than one
 infrastructure change**, and every scenario that changed nothing reported
 generation unchanged.
 
@@ -458,6 +458,7 @@ deciding what a human should do about it.
 | `TARGET_NO_LONGER_HEALTHY` | `ESCALATED` | no | no |
 | `EXECUTION_CONFLICT` | `EXECUTION_FAILED` | **yes** | **yes** |
 | `EXECUTOR_UNAVAILABLE` | `EXECUTION_FAILED` | **yes** | **yes** |
+| `EXECUTION_OUTCOME_UNKNOWN` | `EXECUTION_FAILED` | **yes** | no |
 | `VERIFIER_UNAVAILABLE` | `REMEDIATION_FAILED` | **yes** | no |
 | `VERIFICATION_FAILED` | `ESCALATED` | no | no |
 | `REMEDIATION_FAILED` | `ESCALATED` | no | no |
@@ -569,13 +570,13 @@ all four services            healthy, fault_mode: null
 
 ## Tests
 
-**Offline: 441 passed, 11 skipped** — including 161 Gate E contract tests
+**Offline: 455 passed, 11 skipped** — including 175 Gate E contract tests
 covering fault-injection isolation, malformed model output at the parser,
 dangerous and unknown actions, call bounds, budget exhaustion, doing nothing,
 authenticated-but-invalid worker payloads, retry budgets, escalation-package
 completeness and leakage, and taxonomy consistency.
 
-**Live scenarios:** all fourteen rows of the matrix above ran end to end
+**Live scenarios:** all sixteen rows of the matrix above ran end to end
 against the deployed fleet. They are not all *live platform failures*, and the
 matrix says which is which: the timeout, both 503s, the 409 conflict, the
 candidate probe and the final recovery are failures produced by Google

@@ -64,7 +64,7 @@ Maximum final score: 6.0.
 
 We are not building another generic IT incident-response copilot. The stronger project is:
 
-> A secure autonomous multi-agent Site Continuity Fleet that lets non-technical frontline duty managers resolve and coordinate complex enterprise outages, while enforcing scoped identity, deterministic policy, human approval, and complete auditability.
+> A secure autonomous multi-agent Site Continuity Fleet that lets non-technical frontline duty managers resolve and coordinate complex enterprise outages, while enforcing scoped identity, deterministic policy, a gate that routes risky actions to human approval rather than acting on them, and a tamper-evident audit trail.
 
 Note on wording: this positioning deliberately does **not** claim data
 sovereignty. Authoritative operational state, audit records, and privileged

@@ -178,8 +178,13 @@ still succeed if nothing else advanced the Service in between.
 
 **Correction, recorded after Gate D.3 was implemented:** an earlier draft of
 this note said Firestore fencing "closes that case". It does not. Fencing stops
-a stale worker advancing execution state, writing a receipt, or terminalizing —
-it does not stop it reaching the Cloud Run API. The window is narrowed by both
+a stale worker advancing execution state, renewing, or writing a receipt — it
+does not stop it reaching the Cloud Run API, and it is not what gates
+terminalization. Terminalization is gated on an independent verifier verdict,
+the executor's own re-observation of the live service, and a compare-and-set on
+the expected state. *(This sentence originally said "or terminalizing", which
+was never true — `terminalize()` takes no owner and no `lease_epoch`. Corrected
+after Gate E.)* The window is narrowed by both
 layers and closed by neither alone. See the D3.5 section of
 [`gate-d3-lease-fencing-cas.md`](gate-d3-lease-fencing-cas.md) for the property
 that is actually defended.

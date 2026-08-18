@@ -66,6 +66,14 @@ class WorkerResponse:
     text: str
 
     def json(self) -> Any:
+        """Parse the bounded body.
+
+        Raises `ValueError` for malformed JSON and `RecursionError` for a body
+        nested deeply enough to exhaust the parser. Callers must handle BOTH:
+        they are different exception hierarchies, and treating only the first
+        as "malformed" let a hostile-but-authenticated payload escape typed
+        failure handling entirely.
+        """
         import json
 
         return json.loads(self.text, object_pairs_hook=_reject_duplicate_keys)

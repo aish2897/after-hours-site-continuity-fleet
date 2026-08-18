@@ -89,6 +89,12 @@ that identity alone. This tightened the design rather than broadening it.
 
 Neither `sa-executor` nor `sa-agent-systems` holds **any project-level role**.
 
+> **Superseded at Gate D.1.** Both now hold project-level
+> `roles/logging.logWriter`, and `sa-executor` holds `scfDecisionReader` and
+> `scfExecutionWriter` as IAM-conditioned project bindings. Neither holds any
+> project-level Cloud Run role or any unconditioned Firestore role, so the
+> substantive claim stands. `infra/iam-matrix.md` is authoritative.
+
 | Identity | Binding | Scope |
 |---|---|---|
 | `sa-agent-systems` | `roles/run.viewer` | `dispatch-web` service resource |

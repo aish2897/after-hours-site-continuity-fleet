@@ -13,7 +13,14 @@ def test_australian_infrastructure_regions():
         assert region == config.CORE_REGION
 
 
-def test_model_armor_crosses_to_melbourne_but_stays_in_australia():
+def test_the_planned_model_armor_region_is_australian():
+    """Model Armor is NOT integrated. This pins the PLANNED region only.
+
+    The previous name — "crosses to Melbourne but stays in Australia" —
+    described a hop that never happens, while asserting nothing more than that
+    two constants differ. A test name is documentation, and that one claimed an
+    integration the repo elsewhere denies having.
+    """
     assert config.MODEL_ARMOR_REGION == "australia-southeast2"
     assert config.MODEL_ARMOR_REGION != config.CORE_REGION
     assert config.MODEL_ARMOR_REGION.startswith("australia-")

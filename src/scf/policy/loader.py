@@ -71,6 +71,12 @@ class AgentEntry(Frozen):
     may_propose_actions: bool
     may_write_firestore: bool
     allowed_tools: list[str]
+    #: Whether a runtime for this agent is actually deployed. Three specialists
+    #: are contracts only — no service, no service account — and `llm_backed`
+    #: alone could not say so: "false" reads as "deterministic" rather than
+    #: "does not exist". The registry claims to describe the runtime, so it has
+    #: to be able to say when there isn't one.
+    deployed: bool = False
 
 
 class AgentRegistry(Frozen):

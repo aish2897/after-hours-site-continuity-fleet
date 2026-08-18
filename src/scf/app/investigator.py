@@ -26,6 +26,9 @@ from scf import config, faults
 from scf.domain.enums import ActionType
 from scf.domain.models import Evidence, Proposal
 from scf.obs import log_event, trace_id_from_header
+from scf.tools.cloud_run_evidence import (  # noqa: F401
+    GATHER_EVIDENCE_WORST_CASE_SECONDS,
+)
 from scf.tools.cloud_run_evidence import gather_evidence, propose_remediation
 
 app = FastAPI(title="SCF Systems Investigator", version="0.5.0")
@@ -38,7 +41,18 @@ app = FastAPI(title="SCF Systems Investigator", version="0.5.0")
 #: network call charges the budget, and each carries a 10s client timeout, so
 #: the worst case is the deadline plus at most one call.
 MAX_TOOL_CALLS = int(os.environ.get("SCF_INVESTIGATOR_MAX_TOOL_CALLS", "12"))
-WORK_DEADLINE_SECONDS = float(os.environ.get("SCF_INVESTIGATOR_DEADLINE_SECONDS", "30"))
+#: Derived from what the work actually costs, plus headroom. A fixed 30s sat
+#: BELOW the 43s worst case of the calls it charged for, and only the unhealthy
+#: branch paid the extra — so the budget was tightest at exactly the moment the
+#: service was down, and a remediable outage was escalated as
+#: WORKER_BUDGET_EXCEEDED, which is terminal. One second slower than a clean
+#: rollback meant no rollback at all.
+WORK_DEADLINE_SECONDS = float(
+    os.environ.get(
+        "SCF_INVESTIGATOR_DEADLINE_SECONDS",
+        str(GATHER_EVIDENCE_WORST_CASE_SECONDS + 5.0),
+    )
+)
 
 BUDGET_EXCEEDED = "WORKER_BUDGET_EXCEEDED"
 

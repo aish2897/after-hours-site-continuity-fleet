@@ -555,14 +555,17 @@ def test_a_lapsed_lease_is_reacquired_rather_than_treated_as_a_fence():
     source = inspect.getsource(__import__("scf.app.executor", fromlist=["execute"]).execute)
     assert "if state_result == LEASE_LOST:" in source
     reacquire_at = source.index("if state_result == LEASE_LOST:")
-    receipt_at = source.index("store.record_receipt")
+    # The LAST receipt write is the accepted path's. An earlier one now exists
+    # on the unknown-outcome path, which is a different concern entirely and
+    # must not be what this ordering is measured against.
+    receipt_at = source.rindex("store.record_receipt")
     assert reacquire_at < receipt_at
 
 
 def test_a_genuinely_fenced_worker_writes_no_receipt():
     source = inspect.getsource(__import__("scf.app.executor", fromlist=["execute"]).execute)
     fenced_at = source.index("execution_state_write_fenced")
-    receipt_at = source.index("store.record_receipt")
+    receipt_at = source.rindex("store.record_receipt")
     assert fenced_at < receipt_at
     # The receipt is in the else branch of the fence check, not unconditional.
     between = source[fenced_at:receipt_at]

@@ -746,6 +746,23 @@ async def execute(
             http_status=mutation.get("http_status"),
             resource_version_sent=base["resource_version_sent"],
         )
+        # Record it in the execution plane before answering. For an incident
+        # class defined entirely by "we do not know what happened", keeping the
+        # least evidence about it in the plane that owns execution would be the
+        # wrong way round — the only surviving copy would be the one the
+        # orchestrator writes to the control plane, which is the plane this
+        # identity is deliberately not allowed to write.
+        await run_in_threadpool(
+            store.record_receipt,
+            action_id,
+            {**action.model_dump(mode="json"), "incident_id": request.incident_id},
+        )
+        # And give the lease back. The record stays at MUTATION_REQUESTED, which
+        # already refuses a re-fire, so holding the lease for its full term only
+        # delays the reconciliation that settles this.
+        await run_in_threadpool(
+            store.release, execution_id, owner=owner, lease_epoch=epoch
+        )
         return _refuse(
             "MUTATION_OUTCOME_UNKNOWN",
             http_status=mutation.get("http_status"),
@@ -898,7 +915,35 @@ async def terminalize(
     if current is None:
         return _refuse("execution_not_found", **base)
     if current.get("state") == ExecutionState.VERIFIED.value:
-        return {"verified": True, "terminal": True, "outcome": ALREADY_TERMINAL, **base}
+        # Echo the evidence that closed this execution, from the record.
+        #
+        # Returning only {verified, terminal, outcome} could never satisfy the
+        # caller's contract, which requires `serves_authorized_exclusively` to
+        # be exactly True — so an incident whose repair had already been
+        # verified and terminalized could never be reported RESOLVED. Every
+        # reconcile attempt re-entered here, returned the same unsatisfying
+        # payload, and rested the incident right back where it started. A fully
+        # repaired site would have stayed open forever.
+        #
+        # This is a record, not a fresh observation, and says so. Re-probing
+        # here would be wrong: whether the service is healthy *now* is a
+        # different question from whether this execution was verified, and a
+        # later unrelated outage must not un-terminalize a finished execution.
+        recorded_allocation = current.get("verified_traffic_allocation") or {}
+        return {
+            "verified": True,
+            "terminal": True,
+            "outcome": ALREADY_TERMINAL,
+            **base,
+            "traffic_allocation": recorded_allocation,
+            "serves_authorized_exclusively": bool(
+                current.get("verified_serves_exclusively")
+                or recorded_allocation == {authorized_revision: 100}
+            ),
+            "http_status": current.get("verified_http_status"),
+            "http_healthy": bool(current.get("verified_http_healthy", True)),
+            "evidence_from_record": True,
+        }
     # MUTATED only. `MUTATION_REQUESTED` is written *before* the Cloud Run call,
     # so accepting it would let an execution be closed as VERIFIED on the
     # strength of a healthy service some other actor produced. A mutation whose
@@ -940,6 +985,8 @@ async def terminalize(
         verified_at=utc_now(),
         verified_traffic_allocation=allocation,
         verified_http_status=status_code,
+        verified_http_healthy=healthy,
+        verified_serves_exclusively=exclusive,
     )
     log_event(
         "execution_terminalized",

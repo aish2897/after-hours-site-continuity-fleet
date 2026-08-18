@@ -42,7 +42,8 @@ without changing any authority. See README for what the LLM does at runtime.
 **Prohibited.** Writing Firestore. Any mutation. Restarting production
 databases directly.
 
-**Boundary.** Runs as `sa-agent-systems`, which holds `datastore.viewer` and no
+**Boundary.** Runs as `sa-agent-systems`, which holds no Firestore role at all
+— not even read — and no
 Cloud Run write role. Attempting to modify `dispatch-web` yields a real Google
 403 — IAM proof A.
 

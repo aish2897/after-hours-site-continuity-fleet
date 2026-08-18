@@ -196,7 +196,11 @@ class EscalationPackage(BaseModel):
     impact: str
     specialists_attempted: list[str]
     evidence_summary: list[str]
-    automation_changed_anything: bool
+    #: True / False / None. None is load-bearing: for the outcome-unknown
+    #: categories the honest answer is "we do not know", and collapsing that to
+    #: False told a duty manager as fact the one thing the category exists to
+    #: say is unknown — while the impact line two fields up said the opposite.
+    automation_changed_anything: bool | None
     what_automation_did: str
     current_service_state: str
     operations_restored: bool
@@ -226,6 +230,15 @@ NEXT_ACTION: dict[FailureCategory, str] = {
 }
 
 
+#: Failures where "did anything change?" has no truthful yes/no answer.
+OUTCOME_UNKNOWN_CATEGORIES: frozenset[FailureCategory] = frozenset(
+    {
+        FailureCategory.EXECUTION_OUTCOME_UNKNOWN,
+        FailureCategory.EXECUTOR_UNAVAILABLE,
+    }
+)
+
+
 def build_escalation_package(
     *,
     incident_id: str,
@@ -233,12 +246,16 @@ def build_escalation_package(
     correlation_id: str | None,
     specialists_attempted: list[str],
     evidence_keys: list[str],
-    mutated: bool,
+    mutated: bool | None,
     current_service_state: str,
     operations_restored: bool,
 ) -> EscalationPackage:
     """Deterministic, human-consumable handover. No model text, no secrets."""
     rule = handling(category)
+    if not mutated and category in OUTCOME_UNKNOWN_CATEGORIES:
+        # We did not observe a change. For these categories that is not the
+        # same as there having been none, and the handover must not say it was.
+        mutated = None
     return EscalationPackage(
         incident_id=incident_id,
         correlation_id=correlation_id,
@@ -252,6 +269,9 @@ def build_escalation_package(
         what_automation_did=(
             "A service change was applied and is recorded."
             if mutated
+            else "A change was sent but the system could not confirm whether it "
+            "took effect. It is being re-checked."
+            if mutated is None
             else "No change was made to any service."
         ),
         current_service_state=current_service_state,
