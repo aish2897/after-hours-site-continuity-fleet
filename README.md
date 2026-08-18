@@ -88,6 +88,7 @@ capability beyond the state recorded here.
 | Caller loses a surviving executor → reconciled, one effect | **`VERIFIED`** | [`gate-e`](docs/evidence/gate-e-failure-engineering.md) |
 | Deterministic failure taxonomy + escalation package | **`VERIFIED`** | [`gate-e`](docs/evidence/gate-e-failure-engineering.md) |
 | No blind retry (every retry budget is zero) | **`VERIFIED`** | [`gate-e`](docs/evidence/gate-e-failure-engineering.md) |
+| Ambiguous mutation outcome kept reconcilable (only 409 proves refusal) | `IMPLEMENTED` | `tests/unit/test_failure_engineering.py` · `tests/unit/test_lease_fencing.py` — no live non-409 failure has been produced by Google, so this is not claimed as verified |
 | Closed incident cannot be re-executed | **`VERIFIED`** | [`gate-d3`](docs/evidence/gate-d3-lease-fencing-cas.md) |
 | Reconciliation after an unreachable executor | **`VERIFIED`** | [`gate-d3`](docs/evidence/gate-d3-lease-fencing-cas.md) |
 | An attempted execution never mutates twice | **`VERIFIED`** | [`gate-d3`](docs/evidence/gate-d3-lease-fencing-cas.md) |

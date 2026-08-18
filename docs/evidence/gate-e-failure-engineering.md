@@ -1,6 +1,12 @@
 # Gate E — failure engineering
 
-**Status: PASSED**
+**Status: PENDING FINAL INDEPENDENT REVIEW**
+
+Implementation and live proof are complete and re-verified on the deployed
+build. What is outstanding is *independent* review of the fixes made after
+Codex round 11 — Codex hit a hard account usage limit before round 12 could
+run. Until a reviewer that is not the author has passed on the current HEAD,
+this gate is not claimed as verified.
 
 Sanitized. No credentials, no bearer tokens, no model reasoning. Synthetic data
 only. Every fault below was produced by really breaking something: a Cloud Run
