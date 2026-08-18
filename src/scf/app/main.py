@@ -247,6 +247,11 @@ EXECUTION_FAILURE_CATEGORIES: dict[str, FailureCategory] = {
 
 
 def _execution_failure_category(receipt: dict[str, Any]) -> FailureCategory:
+    if _execution_may_still_land(receipt):
+        # A duplicate that collided with a live, authorized, not-yet-mutated
+        # execution. We do not know what it did next, so the incident must stay
+        # open long enough to find out.
+        return FailureCategory.EXECUTION_OUTCOME_UNKNOWN
     reason = str(receipt.get("reason") or "")
     if reason == "CONCURRENT_MODIFICATION" and not _is_retryable_conflict(receipt):
         # The conflict is real but the executor could not wind its record back,
@@ -866,8 +871,20 @@ async def _run_remediation(
             repo.transition, incident_id, IncidentStatus.EXECUTION_FAILED,
             trace_id=trace_id,
         )
+        # NOT WorkerContractInvalid. That category is terminal, and it is the
+        # right answer for a read-only worker whose bad payload changed nothing.
+        # The executor is the one component that mutates infrastructure, so an
+        # unreadable answer FROM IT means the outcome is unknown — the traffic
+        # flip may well have landed.
+        #
+        # The asymmetry was visible in the system's own behaviour: the same
+        # executor, the same landed mutation, answering with a JSON list instead
+        # of a dict was already handled as EXECUTOR_UNAVAILABLE and stayed
+        # reconcilable, while a dict with one wrong-typed field escalated
+        # terminally and told the manager nothing had changed. Two shapes of one
+        # ambiguity, opposite verdicts.
         raise WorkflowFailure(
-            FailureCategory.WORKER_CONTRACT_INVALID,
+            FailureCategory.EXECUTION_OUTCOME_UNKNOWN,
             f"executor receipt is not a valid contract ({exc.error_count()})",
         ) from exc
 
@@ -875,7 +892,12 @@ async def _run_remediation(
     # an authoritative writer, records what the executor reported.
     # Set before any bookkeeping, so a later failure cannot produce a handover
     # that says nothing changed about a mutation this receipt already reported.
-    if reported.mutated:
+    if reported.progressed():
+        # `progressed()`, not `mutated`. Reconciliation observing that the
+        # authorized target is already live means the effect IS present — it
+        # was applied by an earlier execution of this same authorization. A
+        # handover that then says "no change was made" is wrong in the same way
+        # as before, just one branch over.
         outcome["mutated_infrastructure"] = True
 
     if reported.duplicate:
@@ -1286,6 +1308,17 @@ class TerminalizationReceipt(BaseModel):
 #: by somebody. Reconciliation must not read these as failure.
 LANDED_EXECUTION_STATES = frozenset({"MUTATED", "VERIFIED", "MUTATION_REQUESTED"})
 
+#: States a duplicate can collide with where the winner has NOT yet mutated but
+#: is alive and authorized to. Neither "landed" nor "failed" — unknown.
+#:
+#: The window is real work: an entire Cloud Run Admin API round trip and a
+#: precondition check sit between claiming the execution and issuing the write.
+#: Treating a collision here as a failed remediation closed the incident
+#: terminally, and then the winner — still holding a valid lease — flipped
+#: traffic anyway. Infrastructure changed after the incident was closed
+#: asserting that nothing had.
+LIVE_PRE_MUTATION_STATES = frozenset({"CLAIMED", "PRECONDITION_CHECKED"})
+
 
 def _execution_already_landed(receipt: dict[str, Any]) -> bool:
     """Did a worker other than this call already carry the execution forward?
@@ -1305,6 +1338,15 @@ def _execution_already_landed(receipt: dict[str, Any]) -> bool:
     if not reported.duplicate:
         return False
     return str(reported.state or "") in LANDED_EXECUTION_STATES
+
+
+def _execution_may_still_land(receipt: dict[str, Any]) -> bool:
+    """Did this call collide with a winner that has not mutated yet, but may?"""
+    try:
+        reported = ExecutionReceipt.model_validate(receipt)
+    except ValidationError:
+        return False
+    return reported.duplicate and str(reported.state or "") in LIVE_PRE_MUTATION_STATES
 
 
 #: Non-terminal states meaning "a mutation may have happened and we could not
@@ -1380,7 +1422,7 @@ async def reconcile_incident(
         # produced here told the manager "No change was made to any service"
         # about a mutation the executor had just reported as landed — and only
         # an unreachable verifier was needed to reach that.
-        if reported.mutated:
+        if reported.progressed():
             outcome["mutated_infrastructure"] = True
 
         if status is IncidentStatus.EXECUTION_FAILED:
@@ -1388,10 +1430,14 @@ async def reconcile_incident(
             # reach the executor to learn the outcome. Reconciliation does not
             # re-open execution — it establishes what actually happened.
             if not (reported.progressed() or _execution_already_landed(receipt)):
-                if _is_retryable_conflict(receipt):
-                    # Same rule on the recovery path: a conflict that applied
-                    # nothing leaves the incident reconcilable rather than
-                    # closing it.
+                if _is_retryable_conflict(receipt) or _execution_may_still_land(receipt):
+                    # Same rule on the recovery path, and for the same two
+                    # cases: a conflict that provably applied nothing, and a
+                    # duplicate that collided with a live winner which has not
+                    # mutated YET but is authorized to. Neither is a failure,
+                    # and closing on either would be closing before the answer
+                    # exists — the second one lets the winner mutate after the
+                    # incident is already terminal.
                     outcome["awaiting_reconciliation"] = True
                     outcome["final_status"] = IncidentStatus.EXECUTION_FAILED.value
                     final = await run_in_threadpool(repo.get, incident_id)

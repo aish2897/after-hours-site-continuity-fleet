@@ -2295,3 +2295,97 @@ def test_prefix_stripping_has_no_iteration_cliff():
     # made only of guards terminates.
     assert body_is_healthy(")]}'\n" * 12 + '{"status":"UP"}') is True
     assert body_is_healthy(")]}'\n" * 500) is False
+
+
+# --- Internal hostile review, round 5 ----------------------------------------
+
+
+def test_an_unreadable_executor_receipt_is_an_unknown_outcome():
+    """The executor is the component that mutates. Its silence is not a "no"."""
+    from scf.app import main
+    from scf.domain.failures import handling
+
+    source = inspect.getsource(main._run_remediation)
+    block = source[source.index("ExecutionReceipt.model_validate(receipt)"):]
+    block = block[: block.index("# The executor cannot write the control plane")]
+    assert "FailureCategory.EXECUTION_OUTCOME_UNKNOWN" in block
+    assert "WORKER_CONTRACT_INVALID" not in block, (
+        "terminal is the wrong answer when the mutation may have landed"
+    )
+    assert handling(FailureCategory.EXECUTION_OUTCOME_UNKNOWN).reconcilable is True
+
+    # The same ambiguity delivered as a non-dict already stayed reconcilable;
+    # both shapes must now agree.
+    assert main._categorise(
+        main.DownstreamFailure("executor", "malformed_response", "x")
+    ) is FailureCategory.EXECUTOR_UNAVAILABLE
+    assert handling(FailureCategory.EXECUTOR_UNAVAILABLE).reconcilable is True
+
+
+def test_a_duplicate_colliding_before_the_mutation_is_not_a_failure():
+    """The winner is alive, authorized, and has not written yet."""
+    from scf.app.main import (
+        LIVE_PRE_MUTATION_STATES,
+        _execution_failure_category,
+        _execution_may_still_land,
+    )
+    from scf.domain.failures import handling
+
+    for state in LIVE_PRE_MUTATION_STATES:
+        receipt = {"executed": False, "mutated": False, "duplicate": True,
+                   "terminal": False, "state": state}
+        assert _execution_may_still_land(receipt) is True, state
+        category = _execution_failure_category(receipt)
+        assert category is FailureCategory.EXECUTION_OUTCOME_UNKNOWN, state
+        assert handling(category).reconcilable is True, (
+            "closing here lets the winner mutate after the incident is terminal"
+        )
+
+    # A non-duplicate, and a duplicate that already landed, are unaffected.
+    assert _execution_may_still_land({"state": "CLAIMED"}) is False
+    assert _execution_may_still_land(
+        {"duplicate": True, "state": "MUTATED"}
+    ) is False
+
+
+def test_a_reconciled_landing_is_still_a_landing():
+    """Observing the effect already present is not "no change was made"."""
+    from scf.app import main
+
+    primary = inspect.getsource(main._run_remediation)
+    recovery = inspect.getsource(main.reconcile_incident)
+    for name, source in (("primary", primary), ("recovery", recovery)):
+        window = source[: source.index('outcome["mutated_infrastructure"] = True')]
+        code = [
+            ln.strip()
+            for ln in window.splitlines()
+            if ln.strip() and not ln.strip().startswith("#")
+        ]
+        guard = code[-1]
+        assert guard == "if reported.progressed():", (
+            f"{name} path must credit a reconciled landing, not only a mutation; "
+            f"guard is {guard!r}"
+        )
+
+
+def test_the_prefix_strip_loop_provably_terminates():
+    """It consumes untrusted input with no iteration count. Prove the bound."""
+    from scf.tools import cloud_run_evidence
+    from scf.tools.cloud_run_evidence import MAX_HEALTH_BODY_BYTES, body_is_healthy
+
+    # Every non-breaking iteration strictly shortens the string: `lstrip` and
+    # the prefix slice both remove leading characters only, so `stripped` is
+    # always a suffix of `text`; equal length therefore implies equality, which
+    # breaks. Length is capped before the loop, so the loop is bounded.
+    source = _stripped_source(body_is_healthy)
+    assert "if stripped == text:" in source, "the shrink-or-break guard is the bound"
+    assert "MAX_HEALTH_BODY_BYTES" in source
+
+    for body in (
+        ")]}'" * 4000,
+        "﻿)]}'" * 3000,
+        "﻿ " * 5000,
+        "for(;;);" * 4000,
+    ):
+        assert body_is_healthy(body[:MAX_HEALTH_BODY_BYTES]) is False
+    assert cloud_run_evidence.MAX_HEALTH_BODY_BYTES == 64 * 1024
