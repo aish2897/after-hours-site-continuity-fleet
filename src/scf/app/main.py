@@ -529,10 +529,13 @@ def _observe_service_state(outcome: dict[str, Any]) -> dict[str, Any]:
             "restored": healthy,
         }
 
+    # No bare 200 may claim recovery. A service can answer 200 with a body
+    # saying it is unhealthy, so a status code without the trusted health
+    # verdict beside it is not evidence that operations are restored — only
+    # evidence that something answered. A non-200 is still allowed to say the
+    # service is not responding: that direction cannot overstate the recovery.
     status = outcome.get("service_http_status")
-    if status == 200:
-        return {"state": "the dispatch service is responding normally", "restored": True}
-    if isinstance(status, int) and status:
+    if isinstance(status, int) and status and status != 200:
         return {
             "state": "the dispatch service is still not responding normally",
             "restored": False,

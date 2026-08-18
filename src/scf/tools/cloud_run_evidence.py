@@ -111,8 +111,15 @@ _UNHEALTHY_PHRASES = ("not healthy", "not ok", "not ready", "not serving")
 #: service that is genuinely healthy — a false negative in the one place where
 #: failing closed does real damage. Negators are matched only against failure
 #: words, so `not healthy` above is untouched.
+#:
+#: Deliberately narrow. The separator is a plain space and there is no numeric
+#: negator, because `{"checks": ["0: failed"]}` is an *indexed* failure report,
+#: not a claim that zero things failed — and reading it as a negation turned a
+#: genuine failure into a healthy verdict, which is the worst direction this
+#: predicate can be wrong in. `"0 failures"` is therefore read pessimistically;
+#: a service that means it is fine can say `no failures` or `zero failures`.
 _NEGATED_FAILURE = re.compile(
-    "(?<![a-z])(?:no|not|zero|never|without|0)[^a-z0-9]+"
+    "(?<![a-z])(?:no|not|zero|never|without) +"
     "(?:" + "|".join(sorted(_UNHEALTHY_WORDS, key=len, reverse=True)) + ")s?(?![a-z])"
 )
 
@@ -251,12 +258,21 @@ def body_is_healthy(body: str) -> bool:
     if not text:
         return False
 
+    looks_like_json = text[:1] in ("{", "[")
     try:
         payload = json.loads(text, object_pairs_hook=_object_pairs)
     except RecursionError:
         payload = None
     except ValueError:
         payload = None
+
+    if payload is None and looks_like_json:
+        # A truncated or invalid JSON body is not a plain-text health answer,
+        # and must not be handed to word matching: `{"status":"UP"` with the
+        # brace never closed would be read as healthy off the marker word
+        # alone, which is exactly how a half-delivered response from a failing
+        # service gets mistaken for a report that it is fine.
+        return False
 
     verdicts = _collect_health_verdicts(payload)
     if verdicts:
@@ -273,6 +289,14 @@ def body_is_healthy(body: str) -> bool:
         # closed in the worst place — it would block a genuine recovery from
         # ever being verified.
         return all(verdicts)
+
+    if payload is not None:
+        # It parsed, and it answered nothing this reader recognises. Handing it
+        # to word matching would scan the raw text including KEY NAMES, so a
+        # body like `{"healthy_check_name": "x"}` would be read as healthy off
+        # a name. A structured body that declines to state a verdict is not a
+        # statement of health.
+        return False
 
     return _text_is_healthy(text)
 

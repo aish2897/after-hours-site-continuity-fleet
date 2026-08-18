@@ -613,8 +613,12 @@ def test_the_handover_reports_only_what_an_authorized_identity_observed():
     assert main._observe_service_state(
         {"verification": {"verdict": "RECOVERED"}}
     )["restored"] is False, "an unvalidated body must never claim restoration"
-    # Otherwise the investigator's trusted observation.
-    assert main._observe_service_state({"service_http_status": 200})["restored"] is True
+    # Otherwise the investigator's trusted health verdict — never a bare 200,
+    # which says only that something answered.
+    assert main._observe_service_state(
+        {"service_http_status": 200, "service_observed_healthy": True}
+    )["restored"] is True
+    assert main._observe_service_state({"service_http_status": 200})["restored"] is False
     assert main._observe_service_state({"service_http_status": 503})["restored"] is False
 
 
@@ -1527,7 +1531,6 @@ def test_a_negated_failure_word_is_not_a_failure_report():
     for body in (
         '{"status":"UP","details":{"database":"UP"},"message":"no failure detected"}',
         '{"status":"UP","note":"never failed"}',
-        '{"status":"UP","note":"0 failures"}',
         '{"status":"UP","note":"zero failures since restart"}',
     ):
         assert body_is_healthy(body) is True, body
@@ -1553,3 +1556,68 @@ def test_the_handover_reports_the_health_verdict_not_the_status_code():
     assert main._observe_service_state(
         {"service_observed_healthy": True, "verification_checked": {"recovered": False}}
     )["restored"] is False
+
+
+# --- Codex Gate E audit, round 10 --------------------------------------------
+
+
+def test_a_worker_cannot_answer_the_same_key_twice():
+    """Last-write-wins on a safety flag discards the worker's own refusal."""
+    from scf.app.invoke import WorkerResponse
+
+    contradictory = WorkerResponse(
+        200, '{"budget_exceeded": true, "evidence": [], "budget_exceeded": false}'
+    )
+    with pytest.raises(ValueError):
+        contradictory.json()
+
+    # Nested objects are checked too, and honest payloads are untouched.
+    with pytest.raises(ValueError):
+        WorkerResponse(200, '{"a": {"x": 1, "x": 2}}').json()
+    assert WorkerResponse(200, '{"a": 1, "b": {"c": 2}}').json() == {"a": 1, "b": {"c": 2}}
+
+
+def test_an_indexed_failure_is_not_a_negated_failure():
+    """`["0: failed"]` is a failure report, not a claim that zero things failed."""
+    from scf.tools.cloud_run_evidence import body_is_healthy
+
+    assert body_is_healthy('{"status":"UP","checks":["0: failed"]}') is False
+    assert body_is_healthy('{"status":"UP","checks":{"1": "failed"}}') is False
+    # Real negation, with a real space, still reads as healthy.
+    assert body_is_healthy('{"status":"UP","note":"no failure detected"}') is True
+    assert body_is_healthy('{"status":"UP","note":"zero failures since restart"}') is True
+
+
+def test_a_body_that_meant_to_be_json_and_is_not_is_never_healthy():
+    """A half-delivered response is not a report that the service is fine."""
+    from scf.tools.cloud_run_evidence import body_is_healthy
+
+    assert body_is_healthy('{"status":"UP"') is False
+    assert body_is_healthy('{"healthy": true') is False
+    assert body_is_healthy('[{"status": "UP"}') is False
+    # Genuine plain text is still read as plain text.
+    assert body_is_healthy("dispatch service healthy") is True
+
+
+def test_structured_json_that_states_no_verdict_is_not_health():
+    """Word matching would scan key NAMES; a name is not an assertion."""
+    from scf.tools.cloud_run_evidence import body_is_healthy
+
+    assert body_is_healthy('{"healthy_check_name": "x"}') is False
+    assert body_is_healthy('{"message": "everything is ok"}') is False
+    assert body_is_healthy('["healthy"]') is False
+    assert body_is_healthy('{"status": "UP"}') is True
+
+
+def test_a_bare_200_cannot_claim_the_service_is_restored():
+    from scf.app import main
+
+    assert main._observe_service_state({"service_http_status": 200}) == {
+        "state": "could not be checked automatically",
+        "restored": False,
+    }
+    assert main._observe_service_state({"service_http_status": 503})["restored"] is False
+    # With the trusted verdict beside it, 200 may speak.
+    assert main._observe_service_state(
+        {"service_http_status": 200, "service_observed_healthy": True}
+    )["restored"] is True

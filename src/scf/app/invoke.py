@@ -29,6 +29,30 @@ class WorkerResponseTooLarge(Exception):
         self.limit = limit
 
 
+class DuplicateJSONKey(ValueError):
+    """A worker answered with the same key twice."""
+
+
+def _reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    """Refuse any JSON object that names a key more than once.
+
+    RFC 8259 says a receiver's behaviour is unpredictable when a name repeats,
+    and Python's decoder resolves it by keeping the last one. That is
+    last-write-wins on a safety flag: a worker answering both
+    `"budget_exceeded": true` and `"budget_exceeded": false` had its refusal
+    silently discarded and the workflow carried on to authorization. A
+    well-formed worker never repeats a key, so repeating one is a contract
+    violation and is treated as such — no attempt is made to guess which value
+    was meant.
+    """
+    seen: set[str] = set()
+    for key, _value in pairs:
+        if key in seen:
+            raise DuplicateJSONKey(f"duplicate JSON key {key!r} in worker response")
+        seen.add(key)
+    return dict(pairs)
+
+
 @dataclass(frozen=True)
 class WorkerResponse:
     """A bounded worker answer.
@@ -44,7 +68,7 @@ class WorkerResponse:
     def json(self) -> Any:
         import json
 
-        return json.loads(self.text)
+        return json.loads(self.text, object_pairs_hook=_reject_duplicate_keys)
 
 
 def _identity_token(audience: str) -> str:
