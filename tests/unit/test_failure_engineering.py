@@ -1621,3 +1621,69 @@ def test_a_bare_200_cannot_claim_the_service_is_restored():
     assert main._observe_service_state(
         {"service_http_status": 200, "service_observed_healthy": True}
     )["restored"] is True
+
+
+# --- Codex Gate E audit, round 11 --------------------------------------------
+
+
+def test_every_healthy_marker_has_its_negation():
+    """The phrase list was written for four markers; four more were added."""
+    from scf.tools.cloud_run_evidence import (
+        _HEALTHY_MARKERS,
+        _UNHEALTHY_PHRASES,
+        body_is_healthy,
+    )
+
+    for marker in _HEALTHY_MARKERS:
+        assert f"not {marker}" in _UNHEALTHY_PHRASES, marker
+        assert body_is_healthy('{"status": "not %s"}' % marker) is False, marker
+
+
+def test_zero_negates_a_count_but_an_index_does_not():
+    """`0 failed checks` is a count. `0: failed` is a report. `3 failed` is a report."""
+    from scf.tools.cloud_run_evidence import body_is_healthy
+
+    assert body_is_healthy('{"status":"UP","message":"0 failed checks"}') is True
+    assert body_is_healthy('{"status":"UP","checks":["0: failed"]}') is False
+    assert body_is_healthy('{"status":"UP","message":"3 failed checks"}') is False
+    assert body_is_healthy('{"status":"UP","message":"1 failure"}') is False
+
+
+def test_only_a_409_proves_the_mutation_did_not_land():
+    """Google may return DEADLINE_EXCEEDED after applying a state change."""
+    from scf.domain.failures import FailureCategory, handling
+
+    conflict = handling(FailureCategory.EXECUTION_CONFLICT)
+    unknown = handling(FailureCategory.EXECUTION_OUTCOME_UNKNOWN)
+
+    # A refused write may be retried; an unknown one may not — retrying it
+    # would be the second infrastructure effect from one authorization.
+    assert conflict.retry_eligible is True
+    assert unknown.retry_eligible is False
+
+    # Neither may close the incident: both stay reconcilable.
+    assert conflict.reconcilable is True
+    assert unknown.reconcilable is True
+    assert unknown.resting_status is IncidentStatus.EXECUTION_FAILED
+
+    # And the manager is told the truth: not that it failed, but that the
+    # result is not yet known.
+    assert "could not confirm" in unknown.manager_summary
+    assert "failed" not in unknown.manager_summary.lower()
+
+
+def test_terminalization_is_evidence_gated_and_said_to_be():
+    """The docs claimed a lease fence that terminalize() never had."""
+    from pathlib import Path
+
+    from scf.state.execution_store import ExecutionStore
+
+    signature = inspect.signature(ExecutionStore.terminalize)
+    assert "owner" not in signature.parameters
+    assert "lease_epoch" not in signature.parameters
+
+    root = Path(__file__).resolve().parents[2]
+    for name in ("SECURITY.md", "STATUS.md"):
+        text = " ".join((root / name).read_text(encoding="utf-8").lower().split())
+        assert "renew, or terminalize" not in text, name
+        assert "renew, cannot terminalize" not in text, name

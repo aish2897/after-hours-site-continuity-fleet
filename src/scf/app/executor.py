@@ -722,7 +722,40 @@ async def execute(
     action.error = None if accepted else str(mutation.get("error"))[:400]
     action.finished_at = utc_now()
 
-    final_state = ExecutionState.MUTATED if accepted else ExecutionState.FAILED
+    if not accepted:
+        # Google answered with something other than 409. Only a 409 ABORTED is
+        # proof the write was refused — it is the platform reporting that it
+        # declined the precondition. Every other error leaves the outcome
+        # genuinely unknown, and Google's own guidance for state-changing calls
+        # is that DEADLINE_EXCEEDED can be returned *after* the change was
+        # applied. Writing terminal FAILED here would record "nothing happened"
+        # about a mutation that may well have happened, and terminal is the one
+        # state reconciliation cannot rescue.
+        #
+        # The record therefore stays at MUTATION_REQUESTED, which already means
+        # exactly this: issued, outcome unknown. Reconciliation converts it to
+        # MUTATED if the authorized target is observed live, and refuses to
+        # re-fire it either way, so one authorization still produces at most one
+        # infrastructure effect.
+        log_event(
+            "execution_outcome_unknown",
+            severity="ERROR",
+            trace_id=trace_id,
+            incident_id=request.incident_id,
+            execution_id=execution_id,
+            http_status=mutation.get("http_status"),
+            resource_version_sent=base["resource_version_sent"],
+        )
+        return _refuse(
+            "MUTATION_OUTCOME_UNKNOWN",
+            http_status=mutation.get("http_status"),
+            retryable=False,
+            result=mutation,
+            action=action.model_dump(mode="json"),
+            **base,
+        )
+
+    final_state = ExecutionState.MUTATED
     state_result, _ = await run_in_threadpool(
         _advance,
         final_state,

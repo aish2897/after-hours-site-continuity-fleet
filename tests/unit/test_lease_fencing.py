@@ -775,9 +775,41 @@ def test_a_real_conflict_rewinds_so_a_retry_stays_possible():
 
 
 def test_a_non_conflict_failure_stays_conservative():
-    """A 500 might have applied something; only 409 proves it did not."""
-    source = inspect.getsource(__import__("scf.app.executor", fromlist=["execute"]).execute)
-    assert "ExecutionState.MUTATED if accepted else ExecutionState.FAILED" in source
+    """A 500 might have applied something; only 409 proves it did not.
+
+    This test previously asserted the opposite of its own docstring — that a
+    non-409 wrote terminal `FAILED`. Terminal is the one state reconciliation
+    cannot rescue, so recording it about an outcome nobody observed threw away
+    the recovery path for exactly the case it was written to protect.
+    """
+    from scf.app.executor import execute
+    from scf.domain.enums import IncidentStatus
+    from scf.domain.failures import FailureCategory, handling
+
+    source = inspect.getsource(execute)
+    assert "ExecutionState.FAILED" not in source, (
+        "a non-409 mutation failure must not be recorded as terminal"
+    )
+    assert "MUTATION_OUTCOME_UNKNOWN" in source
+    assert "final_state = ExecutionState.MUTATED" in source
+
+    rule = handling(FailureCategory.EXECUTION_OUTCOME_UNKNOWN)
+    assert rule.reconcilable is True
+    assert rule.retry_eligible is False
+    assert rule.resting_status is not IncidentStatus.ESCALATED
+
+
+def test_an_unknown_mutation_outcome_maps_to_a_reconcilable_category():
+    from scf.app.main import EXECUTION_FAILURE_CATEGORIES, _execution_failure_category
+    from scf.domain.failures import FailureCategory
+
+    assert (
+        EXECUTION_FAILURE_CATEGORIES["MUTATION_OUTCOME_UNKNOWN"]
+        is FailureCategory.EXECUTION_OUTCOME_UNKNOWN
+    )
+    assert _execution_failure_category(
+        {"reason": "MUTATION_OUTCOME_UNKNOWN"}
+    ) is FailureCategory.EXECUTION_OUTCOME_UNKNOWN
 
 
 # --- Codex review round 4 -----------------------------------------------------

@@ -110,7 +110,14 @@ Stated plainly rather than implied away.
    recoverable, effect-idempotent execution with reconciliation.
 6. **The stale-worker window is narrowed, not eliminated.** Ownership is fenced
    by a `lease_epoch`, so a worker whose lease was taken cannot advance
-   execution state, renew, or terminalize — proven live. Cloud Run v1
+   execution state, renew, or write a receipt — proven live. Terminalization is
+   deliberately *not* lease-gated, and saying it was overstated the fence: it
+   performs no infrastructure mutation, so ownership is the wrong gate for it.
+   What gates it instead is an independent verifier verdict, the executor's own
+   re-observation of the live service, and a transactional compare-and-set on
+   the expected execution state. A stale worker calling it can only close an
+   execution the infrastructure already proves — it cannot manufacture that
+   proof. Cloud Run v1
    `resourceVersion` optimistic concurrency separately stops an obsolete
    Service snapshot from overwriting a newer one, with a real HTTP 409 ABORTED
    from Google. But a worker that lost its lease *after* its final ownership

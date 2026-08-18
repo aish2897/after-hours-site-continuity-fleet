@@ -233,6 +233,8 @@ EXECUTION_FAILURE_CATEGORIES: dict[str, FailureCategory] = {
     "STALE_EVIDENCE": FailureCategory.STALE_EVIDENCE,
     "TARGET_NO_LONGER_HEALTHY": FailureCategory.TARGET_NO_LONGER_HEALTHY,
     "MUTATION_DID_NOT_HOLD": FailureCategory.STALE_EVIDENCE,
+    # Issued, and Google answered with something that is not proof either way.
+    "MUTATION_OUTCOME_UNKNOWN": FailureCategory.EXECUTION_OUTCOME_UNKNOWN,
 }
 
 

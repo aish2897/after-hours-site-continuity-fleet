@@ -434,7 +434,7 @@ guessing.
 
 ## E14 — failure taxonomy
 
-Fourteen categories, one table, no free-form failure semantics anywhere. Each
+Fifteen categories, one table, no free-form failure semantics anywhere. Each
 row fixes the resting state, reconcilability, retry eligibility, audit event
 and manager summary together, so a new category cannot be added without
 deciding what a human should do about it.
@@ -546,7 +546,7 @@ all four services            healthy, fault_mode: null
 
 ## Tests
 
-**Offline: 431 passed, 11 skipped** — including 152 Gate E contract tests
+**Offline: 436 passed, 11 skipped** — including 156 Gate E contract tests
 covering fault-injection isolation, malformed model output at the parser,
 dangerous and unknown actions, call bounds, budget exhaustion, doing nothing,
 authenticated-but-invalid worker payloads, retry budgets, escalation-package

@@ -37,6 +37,7 @@ class FailureCategory(StrEnum):
     TARGET_NO_LONGER_HEALTHY = "TARGET_NO_LONGER_HEALTHY"
     EXECUTION_CONFLICT = "EXECUTION_CONFLICT"
     EXECUTOR_UNAVAILABLE = "EXECUTOR_UNAVAILABLE"
+    EXECUTION_OUTCOME_UNKNOWN = "EXECUTION_OUTCOME_UNKNOWN"
     VERIFIER_UNAVAILABLE = "VERIFIER_UNAVAILABLE"
     VERIFICATION_FAILED = "VERIFICATION_FAILED"
     REMEDIATION_FAILED = "REMEDIATION_FAILED"
@@ -144,6 +145,19 @@ HANDLING: dict[FailureCategory, FailureHandling] = {
                 "The outcome is being re-checked before anything is reported as "
                 "done.",
     ),
+    C.EXECUTION_OUTCOME_UNKNOWN: _h(
+        # The mutation was issued and Google answered with something other than
+        # a 409. Only a 409 ABORTED is proof the write was refused; every other
+        # error leaves the outcome genuinely unknown, and Google's own guidance
+        # is that a state-changing call can return DEADLINE_EXCEEDED after the
+        # change was applied. Recording "it failed" would be a claim, not an
+        # observation — and a terminal one, which is the single state
+        # reconciliation cannot rescue.
+        C.EXECUTION_OUTCOME_UNKNOWN, S.EXECUTION_FAILED,
+        reconcilable=True, retry_eligible=False,
+        summary="A repair was sent but the system could not confirm whether it "
+                "took effect, so it is checking rather than reporting a result.",
+    ),
     C.VERIFIER_UNAVAILABLE: _h(
         C.VERIFIER_UNAVAILABLE, S.REMEDIATION_FAILED, reconcilable=True, retry_eligible=False,
         summary="A fix was applied but could not be independently confirmed yet, "
@@ -205,6 +219,7 @@ NEXT_ACTION: dict[FailureCategory, str] = {
     C.TARGET_NO_LONGER_HEALTHY: "Contact technical support and quote the reference below.",
     C.EXECUTION_CONFLICT: "Re-report the problem if it is still happening.",
     C.EXECUTOR_UNAVAILABLE: "No action needed yet. Re-report if the problem continues.",
+    C.EXECUTION_OUTCOME_UNKNOWN: "No action needed yet. The result is still being confirmed.",
     C.VERIFIER_UNAVAILABLE: "No action needed yet. Confirmation is still in progress.",
     C.VERIFICATION_FAILED: "Contact technical support and quote the reference below.",
     C.REMEDIATION_FAILED: "Contact technical support and quote the reference below.",

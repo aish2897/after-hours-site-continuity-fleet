@@ -103,7 +103,11 @@ _UNHEALTHY_WORDS = frozenset(
      "fail", "down", "false"}
 )
 #: Phrases that negate a positive marker and cannot be caught word-by-word.
-_UNHEALTHY_PHRASES = ("not healthy", "not ok", "not ready", "not serving")
+#: Derived from the markers themselves rather than listed by hand: the list was
+#: written when there were four markers, four more were added later, and
+#: `{"status": "not up"}` then read as healthy off the word `up` — a service
+#: reporting its own failure, taken as a report that it was fine.
+_UNHEALTHY_PHRASES = tuple(f"not {marker}" for marker in sorted(_HEALTHY_MARKERS))
 
 #: A negated failure word is not a failure report. `"message": "no failure
 #: detected"` is a service saying it is fine, and reading it as a failure
@@ -118,8 +122,13 @@ _UNHEALTHY_PHRASES = ("not healthy", "not ok", "not ready", "not serving")
 #: genuine failure into a healthy verdict, which is the worst direction this
 #: predicate can be wrong in. `"0 failures"` is therefore read pessimistically;
 #: a service that means it is fine can say `no failures` or `zero failures`.
+#:
+#: A literal `0` is allowed back as a negator, but ONLY with a plain space after
+#: it, which is what separates the count phrase `0 failed checks` from the
+#: indexed report `0: failed`. No other digit negates: `3 failed checks` is a
+#: failure report and must stay one.
 _NEGATED_FAILURE = re.compile(
-    "(?<![a-z])(?:no|not|zero|never|without) +"
+    "(?<![a-z0-9])(?:no|not|zero|never|without|0) +"
     "(?:" + "|".join(sorted(_UNHEALTHY_WORDS, key=len, reverse=True)) + ")s?(?![a-z])"
 )
 

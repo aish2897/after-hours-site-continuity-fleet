@@ -46,8 +46,11 @@ Real execution proof exists in `docs/evidence/`.
   not resolve**
 - **Stale-evidence precondition fails closed with no mutation**
 - **State transition and audit record committed in one Firestore transaction**
-- **Lease-epoch fencing: a stale owner cannot advance state, renew, or
-  terminalize — six real Firestore refusals after a takeover**
+- **Lease-epoch fencing: a stale owner cannot advance state, renew, or write a
+  receipt — real Firestore refusals after a takeover.** Terminalization is
+  evidence-gated rather than lease-gated, on purpose: it mutates nothing, and
+  it requires an independent verifier verdict plus the executor's own
+  re-observation plus a CAS on the expected state
 - **Cloud Run v1 `resourceVersion` CAS: a stale snapshot is refused by Google
   with HTTP 409 ABORTED and no traffic moves**
 - **Traffic-only mutation with zero configuration drift and no new revision**
@@ -82,7 +85,7 @@ Real execution proof exists in `docs/evidence/`.
   action, action outside the closed enum, runaway worker loop, insufficient
   evidence, and a malformed authenticated worker payload. No scenario produced
   more than one infrastructure change.**
-- **Closed failure taxonomy: 14 categories, one table fixing resting state,
+- **Closed failure taxonomy: 15 categories, one table fixing resting state,
   reconcilability, retry eligibility, audit event and manager summary**
 - **Deterministic escalation package: plain-language impact, what automation
   did and did not change, current service state, recommended action — no model

@@ -146,8 +146,17 @@ revision the current template already produced; and traffic tags live inside
 ## D3.5 — the stale-owner race, stated honestly
 
 Firestore fencing is proven above: a stale worker cannot advance state, cannot
-renew, cannot terminalize. Cloud Run OCC is proven above: a stale snapshot is
-rejected by Google.
+renew, and cannot write a receipt. Cloud Run OCC is proven above: a stale
+snapshot is rejected by Google.
+
+> **Corrected after Gate E.** This section originally also said a stale worker
+> "cannot terminalize". That overstated the fence. `terminalize()` takes no
+> owner and no `lease_epoch` by design — it performs no infrastructure
+> mutation, so ownership is the wrong gate for it. It is gated instead on an
+> independent verifier verdict, the executor's own re-observation of the live
+> service, and a transactional compare-and-set on the expected state. Those are
+> the checks the live runs above actually exercised; the lease was never what
+> refused a terminalization.
 
 **What is NOT claimed:** that a fenced worker is physically incapable of
 reaching the Cloud Run API. If worker A loses its lease *after* its final
