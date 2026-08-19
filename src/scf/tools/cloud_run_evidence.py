@@ -562,6 +562,31 @@ def gather_evidence(
     )
     candidate_healthy = candidate_status == 200 and body_is_healthy(candidate_body)
 
+    # An UNBLESSED fallback. Only looked for when no operator-approved rollback
+    # target exists, because that is the only situation where it can matter, and
+    # probing revisions nobody asked about costs the work budget for nothing.
+    #
+    # This is deliberately weaker evidence than the known-good tag, and the
+    # policy treats it as such: a revision that answers a health probe is not a
+    # revision anybody has said the business should be running. Which is exactly
+    # why the action it supports needs a human.
+    fallback_revision = ""
+    fallback_url = ""
+    fallback_status = 0
+    fallback_healthy = False
+    if not approved and live_healthy is False:
+        for entry in traffic:
+            revision = (entry.get("revision") or "").rsplit("/", 1)[-1]
+            entry_url = entry.get("uri") or ""
+            if revision and revision != active_revision and entry_url:
+                fallback_revision = revision
+                fallback_url = entry_url
+                break
+        if fallback_url:
+            spend("probe_fallback_candidate")
+            fallback_status, fallback_body = probe_health(fallback_url)
+            fallback_healthy = fallback_status == 200 and body_is_healthy(fallback_body)
+
     return [
         _ev("service_exists", True, "target is a real Cloud Run service"),
         _ev("service_url", url, "where live health was probed"),
@@ -581,6 +606,14 @@ def gather_evidence(
             "candidate revision probed directly"),
         _ev("candidate_probe_healthy", candidate_healthy,
             "candidate proven healthy before being proposed"),
+        _ev("fallback_candidate_revision", fallback_revision or None,
+            "an addressable revision that is not the failing one and carries no "
+            "operator approval"),
+        _ev("fallback_candidate_probe_http_status", fallback_status,
+            "fallback revision probed directly through its own URL"),
+        _ev("fallback_candidate_probe_healthy", fallback_healthy,
+            "fallback answers a health probe — which is NOT the same as being "
+            "the version the business should run"),
     ]
 
 
@@ -599,6 +632,27 @@ def propose_remediation(
     # A rollback target must be approved AND independently proven healthy.
     # "Not currently active" is not evidence of anything.
     if not facts.get("candidate_revision_approved"):
+        # No operator-approved target. There may still be a revision that
+        # answers a probe, and proposing to move traffic there is legitimate —
+        # but it is a different action with a different authorization regime,
+        # and the difference is decided here by TRUSTED EVIDENCE about the
+        # service, never by anything a caller supplied.
+        if facts.get("fallback_candidate_probe_healthy"):
+            return Proposal(
+                action_type=ActionType.SHIFT_TRAFFIC_TO_APPROVED_CANDIDATE,
+                target_ref=service,
+                confidence=0.7,
+                rationale=(
+                    f"{service} returned HTTP {facts.get('http_status')} on revision "
+                    f"{facts.get('active_revision')}. No operator-approved rollback "
+                    f"target exists. Revision "
+                    f"{facts.get('fallback_candidate_revision')} was probed directly "
+                    f"and returned HTTP "
+                    f"{facts.get('fallback_candidate_probe_http_status')}, but nobody "
+                    f"has approved it as the version to run."
+                ),
+                proposed_by=f"agent:{AGENT}",
+            )
         return None
     if not facts.get("candidate_probe_healthy"):
         return None

@@ -44,6 +44,16 @@ class ActionType(StrEnum):
     """
 
     FLIP_TRAFFIC_TO_LAST_GOOD = "FLIP_TRAFFIC_TO_LAST_GOOD"
+    #: The same Cloud Run traffic mutation, aimed somewhere nobody has blessed.
+    #:
+    #: Rolling back to a revision an operator tagged `known-good` is a low-risk,
+    #: reversible move to a state that was deliberately approved in advance.
+    #: Moving production traffic to a revision that merely *probes healthy* is a
+    #: judgement call: nothing says it is the right version, only that it
+    #: answers. Same primitive, same revision pinning, same OCC, same scoped
+    #: identity — different authorization regime, and that difference comes from
+    #: trusted evidence about the target, never from anything a caller says.
+    SHIFT_TRAFFIC_TO_APPROVED_CANDIDATE = "SHIFT_TRAFFIC_TO_APPROVED_CANDIDATE"
     RESTART_APPLICATION_SERVICE = "RESTART_APPLICATION_SERVICE"
     RESTART_DATABASE_SERVICE = "RESTART_DATABASE_SERVICE"
     DISABLE_FIREWALL = "DISABLE_FIREWALL"

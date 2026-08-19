@@ -67,6 +67,7 @@ from scf.state import (
     IncidentNotFound,
     IncidentRepository,
 )
+from scf.state.firestore_repo import ApprovalNotFound
 from scf.state.execution_store import TERMINAL_STATES as TERMINAL_EXECUTION_STATES
 from scf.state.execution_store import (
     ACQUIRED,
@@ -202,11 +203,22 @@ def _validate(
     if decision.get("revoked"):
         return "decision_revoked"
     if decision.get("decision") not in EXECUTABLE:
-        return f"decision_not_executable:{decision.get('decision')}"
+        # An APPROVAL_REQUIRED decision is executable ONLY on the strength of a
+        # human approval this identity has verified for itself. Reaching this
+        # service proves Cloud Run let the caller in; it does not prove anybody
+        # authorized the action. The orchestrator checks the approval too, and
+        # that is defence in depth, not a substitute — a compromised or buggy
+        # orchestrator must not be able to talk this executor into mutating
+        # something no person agreed to.
+        if decision.get("decision") != Decision.APPROVAL_REQUIRED.value:
+            return f"decision_not_executable:{decision.get('decision')}"
+        problem = _approval_blocks_execution(decision, request.incident_id)
+        if problem:
+            return problem
     action_type = decision.get("action_type")
     if action_type not in {a.value for a in ActionType}:
         return "action_type_not_in_closed_enum"
-    if action_type != ActionType.FLIP_TRAFFIC_TO_LAST_GOOD.value:
+    if action_type not in TRAFFIC_MUTATION_ACTIONS:
         return f"unsupported_action_type:{action_type}"
     if decision.get("target_ref") not in default_policy().targets:
         return "target_not_registry_approved"
@@ -214,6 +226,54 @@ def _validate(
         return "executor_tool_not_permitted"
     if not (decision.get("parameters") or {}).get("authorized_target_revision"):
         return "missing_authorized_target_revision"
+    return None
+
+
+#: The actions this executor can actually perform. Both are the SAME Cloud Run
+#: traffic mutation under the same scoped identity, exact revision pinning and
+#: resourceVersion OCC — they differ only in what authorized them.
+TRAFFIC_MUTATION_ACTIONS = frozenset(
+    {
+        ActionType.FLIP_TRAFFIC_TO_LAST_GOOD.value,
+        ActionType.SHIFT_TRAFFIC_TO_APPROVED_CANDIDATE.value,
+    }
+)
+
+
+def _approval_blocks_execution(decision: dict[str, Any], incident_id: str) -> str | None:
+    """Verify the human approval independently, from the authoritative plane.
+
+    Returns a refusal reason, or None when a valid approval genuinely permits
+    this exact decision. The fingerprint check is what makes the approval
+    specific: it binds incident, action, target, exact revision, policy version
+    and evidence snapshot together, so an approval cannot be carried across to a
+    different decision, a different revision, or a re-issued authorization.
+    """
+    repo = authoritative()
+    decision_id = str(decision.get("decision_id") or "")
+    approval_id = repo.find_approval_for_decision(incident_id, decision_id)
+    if not approval_id:
+        return "no_approval_for_decision"
+    try:
+        approval = repo.get_approval(approval_id)
+    except ApprovalNotFound:
+        return "approval_not_found"
+    if approval.get("state") != "APPROVED":
+        return f"approval_state:{approval.get('state')}"
+    if str(approval.get("expires_at") or "") <= utc_now().isoformat():
+        return "approval_expired"
+
+    params = decision.get("parameters") or {}
+    expected = derive_authorization_fingerprint(
+        incident_id=incident_id,
+        action_type=str(decision.get("action_type") or ""),
+        target_ref=str(decision.get("target_ref") or ""),
+        authorized_target_revision=str(params.get("authorized_target_revision") or ""),
+        policy_version=str(decision.get("policy_version") or ""),
+        evidence_snapshot_hash=str(decision.get("evidence_snapshot_hash") or ""),
+    )
+    if approval.get("decision_fingerprint") != expected:
+        return "approval_fingerprint_mismatch"
     return None
 
 

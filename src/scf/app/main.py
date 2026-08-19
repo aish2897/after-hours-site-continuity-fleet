@@ -22,7 +22,15 @@ from scf.domain.failures import (
     build_escalation_package,
     handling,
 )
-from scf.domain.ids import new_incident_id
+from datetime import timedelta
+
+from scf.domain.approval_text import APPROVAL_TTL_SECONDS, approval_prompt
+from scf.domain.ids import (
+    derive_authorization_fingerprint,
+    new_approval_id,
+    new_incident_id,
+    utc_now,
+)
 from scf.domain.state_machine import ASSERTION_STATES, path_to
 from scf.domain.models import (
     ActionRecord,
@@ -34,6 +42,7 @@ from scf.domain.models import (
 from scf.obs import log_event, trace_id_from_header
 from scf.policy import evaluate, trusted_evidence_map
 from scf.state import IncidentNotFound, IncidentRepository
+from scf.state.firestore_repo import ApprovalNotFound
 
 INVESTIGATOR_URL = os.environ.get("SCF_INVESTIGATOR_URL", "")
 EXECUTOR_URL = os.environ.get("SCF_EXECUTOR_URL", "")
@@ -790,6 +799,11 @@ async def _run_remediation(
     # 2. Deterministic authorization over TRUSTED_TOOL evidence only.
     policy_decision = evaluate(proposal, evidence)
     facts = trusted_evidence_map(evidence)
+    authorized_revision = (
+        facts.get("fallback_candidate_revision")
+        if proposal.action_type is ActionType.SHIFT_TRAFFIC_TO_APPROVED_CANDIDATE
+        else facts.get("candidate_revision")
+    )
     await run_in_threadpool(
         repo.transition, incident_id, IncidentStatus.POLICY_EVALUATED, trace_id=trace_id
     )
@@ -801,7 +815,12 @@ async def _run_remediation(
         parameters={
             # The decision authorizes ONE exact revision. The executor may not
             # substitute another, and the verifier must observe this one.
-            "authorized_target_revision": facts.get("candidate_revision"),
+            #
+            # Which revision depends on the action the gate is authorizing: a
+            # blessed rollback pins the known-good tag's revision, an unblessed
+            # shift pins the fallback that was probed. Both come from trusted
+            # evidence in this same snapshot.
+            "authorized_target_revision": authorized_revision,
             # TOCTOU guards captured from the same trusted evidence snapshot.
             "expected_source_revision": facts.get("active_revision"),
             "expected_etag": facts.get("service_etag"),
@@ -828,11 +847,70 @@ async def _run_remediation(
             reason_code=policy_decision.reason_code,
         )
 
+    if policy_decision.decision is Decision.APPROVAL_REQUIRED:
+        # Park, durably, and ask a person.
+        #
+        # Nothing is claimed, no executor is called, no execution identity is
+        # taken and no infrastructure is touched. The incident's whole state
+        # lives in Firestore from here, which is what lets a completely
+        # different process pick it up later — this one may be gone by then.
+        approval_id = new_approval_id()
+        requested_at = utc_now()
+        expires_at = requested_at + timedelta(seconds=APPROVAL_TTL_SECONDS)
+        fingerprint = derive_authorization_fingerprint(
+            incident_id=incident_id,
+            action_type=proposal.action_type.value,
+            target_ref=proposal.target_ref,
+            authorized_target_revision=str(authorized_revision or ""),
+            policy_version=str(policy_decision.policy_version or ""),
+            evidence_snapshot_hash=str(policy_decision.evidence_snapshot_hash or ""),
+        )
+        await run_in_threadpool(
+            repo.create_approval,
+            approval_id=approval_id,
+            incident_id=incident_id,
+            decision_id=policy_decision.decision_id,
+            decision_fingerprint=fingerprint,
+            action_type=proposal.action_type.value,
+            target_ref=proposal.target_ref,
+            authorized_target_revision=str(authorized_revision or ""),
+            required_approval_role=policy_decision.required_approval_role,
+            requested_at=requested_at.isoformat(),
+            expires_at=expires_at.isoformat(),
+            trace_id=trace_id,
+        )
+        await run_in_threadpool(
+            repo.transition,
+            incident_id,
+            IncidentStatus.WAITING_FOR_APPROVAL,
+            trace_id=trace_id,
+        )
+        log_event(
+            "approval_requested",
+            trace_id=trace_id,
+            incident_id=incident_id,
+            approval_id=approval_id,
+            decision_id=policy_decision.decision_id,
+            action_type=proposal.action_type.value,
+            required_approval_role=policy_decision.required_approval_role,
+        )
+        outcome["approval"] = {
+            "approval_id": approval_id,
+            "state": "PENDING",
+            "decision_id": policy_decision.decision_id,
+            "required_approval_role": policy_decision.required_approval_role,
+            "expires_at": expires_at.isoformat(),
+            "awaiting_human": True,
+        }
+        outcome["manager_prompt"] = approval_prompt(
+            action_type=proposal.action_type,
+            target_ref=proposal.target_ref,
+            authorized_target_revision=str(authorized_revision or ""),
+        )
+        outcome["final_status"] = IncidentStatus.WAITING_FOR_APPROVAL.value
+        return outcome
+
     if policy_decision.decision is not Decision.AUTO_ALLOWED:
-        # Record that approval was required — that is the true state — and then
-        # escalate, because nothing in this fleet can grant it yet. Returning
-        # here left the incident parked at WAITING_FOR_APPROVAL with no
-        # handover, no failure category, and no endpoint able to move it.
         await run_in_threadpool(
             repo.transition,
             incident_id,
@@ -1589,3 +1667,430 @@ async def get_incident(
     document["audit_record_count"] = len(audit)
     document["served_by_revision"] = os.environ.get("K_REVISION")
     return document
+
+
+# --- human approval ----------------------------------------------------------
+#
+# The endpoints below are the only way an incident leaves WAITING_FOR_APPROVAL
+# towards execution. Three properties matter more than the code:
+#
+# 1. Cloud Run invoker permission is NOT authorization. Reaching this endpoint
+#    proves only that Google let the request through; whether the pinned
+#    decision may then run is decided against the persisted approval and the
+#    persisted decision, and the executor checks again independently.
+# 2. The caller supplies an approval id and nothing else. It cannot name the
+#    target, the revision, the decision, or itself as approver. Everything that
+#    matters is read from the authoritative plane.
+# 3. No agent in this fleet can call these. Approval is a human act, and the
+#    identity that performs it is recorded.
+
+
+class ApprovalDecisionRequest(BaseModel):
+    """Deliberately almost empty.
+
+    A caller may attach a note for the record. It may not attach a target, a
+    revision, a decision id, or an approver identity — untrusted input does not
+    get to choose what it is authorizing or who it is.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    note: str | None = Field(default=None, max_length=500)
+
+
+#: Set when a deployment can establish a real human principal. Until a manager
+#: UI with verified sign-in exists, the backend proof runs under a dedicated
+#: authenticated demo-approver principal, and says so rather than inventing a
+#: name. See the Gate F evidence for what is and is not proven about identity.
+DEMO_APPROVER_PRINCIPAL = os.environ.get(
+    "SCF_APPROVER_PRINCIPAL", "demo-approver@site-continuity-fleet.invalid"
+)
+
+
+def _approver_principal(assertion: str | None, email: str | None) -> str:
+    """Who approved, from what the platform actually asserts.
+
+    `X-Goog-Authenticated-User-Email` is set by Google in front of the
+    container and cannot be forged by the caller when the service requires
+    authentication — but it is only populated for end-user credentials, not for
+    the service-to-service tokens this fleet uses. So it is read when present,
+    and when it is absent the answer is a named demo principal rather than
+    anything taken from a caller-supplied header.
+    """
+    if email:
+        return email.split(":", 1)[-1]
+    if assertion:
+        return "authenticated-principal (assertion present)"
+    return DEMO_APPROVER_PRINCIPAL
+
+
+async def _record_approval_decision(
+    approval_id: str,
+    *,
+    state: str,
+    trace_id: str | None,
+    approver: str,
+) -> dict[str, Any]:
+    repo = repository()
+    now = utc_now()
+    outcome, record = await run_in_threadpool(
+        repo.decide_approval,
+        approval_id,
+        state=state,
+        approver_principal=approver,
+        decided_at=now.isoformat(),
+        now=now.isoformat(),
+        trace_id=trace_id,
+    )
+    log_event(
+        "approval_decision",
+        severity="WARNING" if outcome == "NOT_FOUND" else "INFO",
+        trace_id=trace_id,
+        approval_id=approval_id,
+        outcome=outcome,
+        requested_state=state,
+        approver_principal=approver,
+        incident_id=record.get("incident_id"),
+        decision_id=record.get("decision_id"),
+    )
+    if outcome == "NOT_FOUND":
+        raise HTTPException(status_code=404, detail="approval_not_found")
+    if outcome == "DECIDED":
+        await run_in_threadpool(
+            repo.append_audit,
+            record["incident_id"],
+            actor="human",
+            event=f"approval_{state.lower()}",
+            payload={
+                "approval_id": approval_id,
+                "decision_id": record.get("decision_id"),
+                "approver_principal": approver,
+                "decision_fingerprint": record.get("decision_fingerprint"),
+            },
+            actor_identity=approver,
+            trace_id=trace_id,
+        )
+    return {
+        "approval_id": approval_id,
+        "outcome": outcome,
+        "state": record.get("state"),
+        "incident_id": record.get("incident_id"),
+        "decision_id": record.get("decision_id"),
+        "approver_principal": record.get("approver_principal"),
+        "decided_at": record.get("decided_at"),
+    }
+
+
+@app.post("/approvals/{approval_id}/approve")
+async def approve(
+    approval_id: str,
+    request: ApprovalDecisionRequest | None = None,
+    x_cloud_trace_context: str | None = Header(default=None),
+    x_goog_iap_jwt_assertion: str | None = Header(default=None),
+    x_goog_authenticated_user_email: str | None = Header(default=None),
+) -> dict[str, Any]:
+    """A person authorizes one pinned decision. Idempotent."""
+    trace_id = trace_id_from_header(x_cloud_trace_context)
+    approver = _approver_principal(
+        x_goog_iap_jwt_assertion, x_goog_authenticated_user_email
+    )
+    return await _record_approval_decision(
+        approval_id, state="APPROVED", trace_id=trace_id, approver=approver
+    )
+
+
+@app.post("/approvals/{approval_id}/reject")
+async def reject(
+    approval_id: str,
+    request: ApprovalDecisionRequest | None = None,
+    x_cloud_trace_context: str | None = Header(default=None),
+    x_goog_iap_jwt_assertion: str | None = Header(default=None),
+    x_goog_authenticated_user_email: str | None = Header(default=None),
+) -> dict[str, Any]:
+    """A person refuses. Nothing is mutated, now or later, under this approval."""
+    trace_id = trace_id_from_header(x_cloud_trace_context)
+    approver = _approver_principal(
+        x_goog_iap_jwt_assertion, x_goog_authenticated_user_email
+    )
+    return await _record_approval_decision(
+        approval_id, state="REJECTED", trace_id=trace_id, approver=approver
+    )
+
+
+@app.get("/approvals/{approval_id}")
+async def read_approval(approval_id: str) -> dict[str, Any]:
+    """Read the durable approval. Proves it outlives the process that made it."""
+    try:
+        record = await run_in_threadpool(repository().get_approval, approval_id)
+    except ApprovalNotFound as missing:
+        raise HTTPException(status_code=404, detail="approval_not_found") from missing
+    return {
+        **record,
+        "served_by_revision": os.environ.get("K_REVISION"),
+    }
+
+
+#: Everything that must still be true before an approval may become a mutation.
+#: Checked at resume time against the authoritative plane, not at approval time
+#: — an approval is permission for the pinned decision, and the world moves.
+def _approval_blockers(
+    approval: dict[str, Any],
+    decision: dict[str, Any],
+    incident: dict[str, Any],
+    *,
+    now_iso: str,
+) -> list[str]:
+    """Every reason this approval may NOT be turned into an infrastructure change.
+
+    Returned as a list rather than a first-failure so the record shows
+    everything that was wrong, which is what a person reading the audit trail
+    actually wants.
+    """
+    blockers: list[str] = []
+    if approval.get("state") != "APPROVED":
+        blockers.append(f"approval_state:{approval.get('state')}")
+    if str(approval.get("expires_at") or "") <= now_iso:
+        blockers.append("approval_expired")
+    if approval.get("decision_id") != decision.get("decision_id"):
+        blockers.append("decision_id_mismatch")
+    if incident.get("status") != IncidentStatus.WAITING_FOR_APPROVAL.value:
+        blockers.append(f"incident_state:{incident.get('status')}")
+    if decision.get("revoked"):
+        blockers.append("decision_revoked")
+    if decision.get("decision") != Decision.APPROVAL_REQUIRED.value:
+        blockers.append(f"decision_not_approval_required:{decision.get('decision')}")
+
+    # The fingerprint is the real check. It covers incident, action, target,
+    # exact revision, policy version and evidence snapshot together, so any
+    # substitution between asking and acting changes it — and an approval for
+    # something else is not an approval for this.
+    params = decision.get("parameters") or {}
+    expected = derive_authorization_fingerprint(
+        incident_id=str(decision.get("incident_id") or ""),
+        action_type=str(decision.get("action_type") or ""),
+        target_ref=str(decision.get("target_ref") or ""),
+        authorized_target_revision=str(params.get("authorized_target_revision") or ""),
+        policy_version=str(decision.get("policy_version") or ""),
+        evidence_snapshot_hash=str(decision.get("evidence_snapshot_hash") or ""),
+    )
+    if approval.get("decision_fingerprint") != expected:
+        blockers.append("decision_fingerprint_mismatch")
+    return blockers
+
+
+@app.post("/incidents/{incident_id}/resume")
+async def resume_incident(
+    incident_id: str,
+    x_cloud_trace_context: str | None = Header(default=None),
+) -> dict[str, Any]:
+    """Continue an approved incident from durable state.
+
+    Deliberately takes identifiers only, and reads everything else from
+    Firestore: the incident, the decision, the approval, the pinned revision.
+    Nothing is carried in memory from the process that asked for approval,
+    because that process is generally gone by the time this runs — which is the
+    whole point of the gate.
+
+    This does not re-investigate, re-decide, or re-approve. The human authorized
+    one specific decision and this executes that one or nothing.
+    """
+    trace_id = trace_id_from_header(x_cloud_trace_context)
+    repo = repository()
+    outcome: dict[str, Any] = {
+        "incident_id": incident_id,
+        "resumed_by_revision": os.environ.get("K_REVISION"),
+    }
+
+    try:
+        incident = await run_in_threadpool(repo.get, incident_id)
+    except IncidentNotFound as missing:
+        raise HTTPException(status_code=404, detail="incident_not_found") from missing
+
+    decision = await run_in_threadpool(repo.latest_decision, incident_id)
+    if not decision:
+        raise HTTPException(status_code=409, detail="no_decision_to_resume")
+
+    approval_id = str(incident.get("approval_id") or "")
+    if not approval_id:
+        approval_id = str(decision.get("approval_id") or "")
+    if not approval_id:
+        # Fall back to the approval that names this decision.
+        approval_id = await run_in_threadpool(
+            repo.find_approval_for_decision, incident_id, decision["decision_id"]
+        )
+    if not approval_id:
+        raise HTTPException(status_code=409, detail="no_approval_for_decision")
+
+    try:
+        approval = await run_in_threadpool(repo.get_approval, approval_id)
+    except ApprovalNotFound as missing:
+        raise HTTPException(status_code=404, detail="approval_not_found") from missing
+
+    blockers = _approval_blockers(
+        approval, decision, incident, now_iso=utc_now().isoformat()
+    )
+    outcome["approval"] = {
+        "approval_id": approval_id,
+        "state": approval.get("state"),
+        "approver_principal": approval.get("approver_principal"),
+        "decided_at": approval.get("decided_at"),
+        "decision_id": approval.get("decision_id"),
+    }
+    if blockers:
+        log_event(
+            "resume_refused",
+            severity="WARNING",
+            trace_id=trace_id,
+            incident_id=incident_id,
+            approval_id=approval_id,
+            blockers=blockers,
+        )
+        await run_in_threadpool(
+            repo.append_audit,
+            incident_id,
+            actor="orchestrator",
+            event="resume_refused",
+            payload={"approval_id": approval_id, "blockers": blockers},
+            trace_id=trace_id,
+        )
+        outcome.update({"resumed": False, "mutated": False, "blockers": blockers,
+                        "status": incident.get("status")})
+        return outcome
+
+    # Every check passed. Record the human's authorization in the incident's own
+    # lifecycle, then run the SAME execution pipeline an auto-allowed decision
+    # uses — same executor, same identity, same OCC, same verifier.
+    await run_in_threadpool(
+        repo.transition, incident_id, IncidentStatus.APPROVED, trace_id=trace_id
+    )
+    log_event(
+        "incident_resumed",
+        trace_id=trace_id,
+        incident_id=incident_id,
+        approval_id=approval_id,
+        decision_id=decision["decision_id"],
+        approver_principal=approval.get("approver_principal"),
+        resumed_by_revision=os.environ.get("K_REVISION"),
+    )
+    outcome["decision_id"] = decision["decision_id"]
+    outcome["authorized_target_revision"] = (
+        decision.get("parameters") or {}
+    ).get("authorized_target_revision")
+
+    return await _execute_approved_decision(
+        repo, incident_id, decision, trace_id, x_cloud_trace_context, outcome
+    )
+
+
+async def _execute_approved_decision(
+    repo: IncidentRepository,
+    incident_id: str,
+    decision: dict[str, Any],
+    trace_id: str | None,
+    trace_header: str | None,
+    outcome: dict[str, Any],
+) -> dict[str, Any]:
+    """Run a human-approved decision through the unchanged execution pipeline.
+
+    Approval changes WHO authorized the action, and nothing else. The executor
+    still re-reads the decision from the authoritative plane rather than
+    trusting this caller, still claims its own execution identity, still
+    re-checks the incident is open, still probes the target for itself, and
+    still mutates under `resourceVersion` optimistic concurrency. The verifier
+    still grades it under a different read-only identity.
+
+    Nothing here is a shortcut earned by having asked a person.
+    """
+    decision_id = decision["decision_id"]
+    try:
+        await run_in_threadpool(
+            repo.transition, incident_id, IncidentStatus.EXECUTING, trace_id=trace_id
+        )
+        receipt = await _call(
+            EXECUTOR_URL,
+            "/execute",
+            {"incident_id": incident_id, "decision_id": decision_id},
+            service="executor",
+            trace_header=trace_header,
+        )
+        outcome["execution"] = receipt
+        try:
+            reported = ExecutionReceipt.model_validate(receipt)
+        except ValidationError as exc:
+            return await _fail(
+                repo,
+                incident_id,
+                WorkflowFailure(
+                    FailureCategory.EXECUTION_OUTCOME_UNKNOWN,
+                    f"executor receipt is not a valid contract ({exc.error_count()})",
+                ),
+                trace_id,
+                outcome,
+            )
+
+        effect_present = _authorized_effect_is_present(receipt, reported)
+        if effect_present is not False:
+            outcome["mutated_infrastructure"] = effect_present
+
+        if not (reported.progressed() or _execution_already_landed(receipt)):
+            await run_in_threadpool(
+                repo.transition,
+                incident_id,
+                IncidentStatus.EXECUTION_FAILED,
+                trace_id=trace_id,
+            )
+            return await _fail(
+                repo,
+                incident_id,
+                WorkflowFailure(
+                    _execution_failure_category(receipt),
+                    str(receipt.get("reason") or "execution did not complete")[:200],
+                    execution_reason=receipt.get("reason"),
+                ),
+                trace_id,
+                outcome,
+            )
+
+        await run_in_threadpool(
+            repo.transition, incident_id, IncidentStatus.EXECUTED, trace_id=trace_id
+        )
+        await run_in_threadpool(
+            repo.transition, incident_id, IncidentStatus.VERIFYING, trace_id=trace_id
+        )
+        outcome["resumed"] = True
+        return await _verify_and_close(
+            repo,
+            incident_id,
+            decision_id,
+            (decision.get("parameters") or {}).get("authorized_target_revision"),
+            trace_id,
+            trace_header,
+            outcome,
+        )
+    except DownstreamFailure as failure:
+        outcome["failed"] = {"service": failure.service, "kind": failure.kind}
+        return await _fail(
+            repo,
+            incident_id,
+            WorkflowFailure(_categorise(failure), f"{failure.service}/{failure.kind}"),
+            trace_id,
+            outcome,
+        )
+    except Exception as exc:  # noqa: BLE001 - a resume must not strand an incident
+        log_event(
+            "resume_unexpected_error",
+            severity="ERROR",
+            trace_id=trace_id,
+            incident_id=incident_id,
+            error_type=type(exc).__name__,
+        )
+        return await _fail(
+            repo,
+            incident_id,
+            WorkflowFailure(
+                FailureCategory.REMEDIATION_FAILED,
+                f"resume failed ({type(exc).__name__})",
+            ),
+            trace_id,
+            outcome,
+        )

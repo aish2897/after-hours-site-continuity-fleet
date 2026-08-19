@@ -59,6 +59,12 @@ def derive_execution_id(
     return sha256(material.encode("utf-8")).hexdigest()
 
 
+def new_approval_id(now: datetime | None = None) -> str:
+    """Server-minted. A caller never chooses which approval it is answering."""
+    stamp = (now or utc_now()).strftime("%Y%m%d")
+    return f"APR-{stamp}-{uuid4().hex[:8].upper()}"
+
+
 def derive_authorization_fingerprint(
     *,
     incident_id: str,

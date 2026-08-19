@@ -21,6 +21,7 @@ from scf.domain.models import (
 from scf.domain.state_machine import assert_transition
 
 INCIDENTS = "incidents"
+APPROVALS = "approvals"
 AUDIT = "audit"
 DECISIONS = "decisions"
 ACTIONS = "actions"
@@ -33,6 +34,10 @@ class IncidentNotFound(KeyError):
 
 
 class DecisionNotFound(KeyError):
+    pass
+
+
+class ApprovalNotFound(KeyError):
     pass
 
 
@@ -289,6 +294,134 @@ class IncidentRepository:
             trace_id=trace_id,
         )
         return decision.decision_id
+
+    # --- human approval ------------------------------------------------------
+    #
+    # Approvals live in the AUTHORITATIVE database, alongside the decisions they
+    # authorize and out of the executor's write reach. An approval is permission
+    # for one exact persisted decision — bound by its authorization fingerprint,
+    # which covers the incident, action, target, exact revision, policy version
+    # and evidence snapshot. Change any of those and the fingerprint changes, so
+    # the approval no longer applies to what is being attempted.
+
+    def create_approval(
+        self,
+        *,
+        approval_id: str,
+        incident_id: str,
+        decision_id: str,
+        decision_fingerprint: str,
+        action_type: str,
+        target_ref: str,
+        authorized_target_revision: str,
+        required_approval_role: str | None,
+        requested_at: str,
+        expires_at: str,
+        trace_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Record a pending request for a human to authorize one decision."""
+        payload = {
+            "approval_id": approval_id,
+            "incident_id": incident_id,
+            "decision_id": decision_id,
+            "decision_fingerprint": decision_fingerprint,
+            "action_type": action_type,
+            "target_ref": target_ref,
+            "authorized_target_revision": authorized_target_revision,
+            "required_approval_role": required_approval_role,
+            "state": "PENDING",
+            "requested_at": requested_at,
+            "expires_at": expires_at,
+            "decided_at": None,
+            "approver_principal": None,
+            "approval_version": 1,
+            "trace_id": trace_id,
+        }
+        # `create`, not `set`: a colliding approval id must fail rather than
+        # overwrite a decision somebody may already have acted on.
+        self._db.collection(APPROVALS).document(approval_id).create(payload)
+        self.append_audit(
+            incident_id,
+            actor="orchestrator",
+            event="approval_requested",
+            payload={
+                "approval_id": approval_id,
+                "decision_id": decision_id,
+                "action_type": action_type,
+                "required_approval_role": required_approval_role,
+                "expires_at": expires_at,
+            },
+            trace_id=trace_id,
+        )
+        return payload
+
+    def get_approval(self, approval_id: str) -> dict[str, Any]:
+        snapshot = self._db.collection(APPROVALS).document(approval_id).get()
+        if not snapshot.exists:
+            raise ApprovalNotFound(approval_id)
+        return snapshot.to_dict() or {}
+
+    def decide_approval(
+        self,
+        approval_id: str,
+        *,
+        state: str,
+        approver_principal: str,
+        decided_at: str,
+        now: str,
+        trace_id: str | None = None,
+    ) -> tuple[str, dict[str, Any]]:
+        """Transactionally record a human decision. Idempotent by construction.
+
+        Returns (outcome, record) where outcome is one of DECIDED,
+        ALREADY_DECIDED, EXPIRED or NOT_FOUND. A second delivery of the same
+        approval is ALREADY_DECIDED and changes nothing — the human pressed the
+        button once, and a retried request must not become a second permission.
+        """
+        ref = self._db.collection(APPROVALS).document(approval_id)
+        transaction = self._db.transaction()
+
+        @firestore.transactional
+        def _apply(tx: firestore.Transaction) -> tuple[str, dict[str, Any]]:
+            snapshot = ref.get(transaction=tx)
+            if not snapshot.exists:
+                return "NOT_FOUND", {}
+            current = snapshot.to_dict() or {}
+            if current.get("state") != "PENDING":
+                return "ALREADY_DECIDED", current
+            if str(current.get("expires_at") or "") <= now:
+                expired = {"state": "EXPIRED", "decided_at": now}
+                tx.update(ref, expired)
+                return "EXPIRED", {**current, **expired}
+            decided = {
+                "state": state,
+                "decided_at": decided_at,
+                "approver_principal": approver_principal,
+            }
+            tx.update(ref, decided)
+            return "DECIDED", {**current, **decided}
+
+        return _apply(transaction)
+
+    def find_approval_for_decision(self, incident_id: str, decision_id: str) -> str:
+        """The approval raised for one decision, or "" if there is none.
+
+        A query rather than a stored pointer on the incident: the incident
+        document is written by the workflow, and an approval must be findable
+        from authoritative facts even if a process died before it could record
+        a convenience reference anywhere.
+        """
+        matches = (
+            self._db.collection(APPROVALS)
+            .where(filter=firestore.FieldFilter("incident_id", "==", incident_id))
+            .where(filter=firestore.FieldFilter("decision_id", "==", decision_id))
+            .limit(2)
+            .get()
+        )
+        found = [doc.to_dict() or {} for doc in matches]
+        if not found:
+            return ""
+        return str(found[0].get("approval_id") or "")
 
     def get_decision(self, incident_id: str, decision_id: str) -> dict[str, Any]:
         snapshot = (

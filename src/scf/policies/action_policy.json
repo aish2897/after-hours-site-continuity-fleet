@@ -1,5 +1,5 @@
 {
-  "policy_version": "1.1.0",
+  "policy_version": "1.2.0",
   "description": "Deterministic authorization policy. This file is the single source of truth. If a rule is not here, it is not a rule. Evaluated only against TRUSTED_TOOL evidence.",
   "targets": {
     "dispatch-web": {
@@ -34,6 +34,19 @@
         "service_unhealthy": true,
         "candidate_revision_approved": true,
         "candidate_probe_healthy": true
+      }
+    },
+    {
+      "action_type": "SHIFT_TRAFFIC_TO_APPROVED_CANDIDATE",
+      "target_type": "cloud_run_service_non_critical",
+      "decision": "APPROVAL_REQUIRED",
+      "reason_code": "UNBLESSED_CANDIDATE_RISK",
+      "reason": "No operator-approved rollback target exists. Moving live traffic to a revision that only probes healthy is a judgement about which version the business should be running, so a person makes it.",
+      "required_approval_role": "incident_commander",
+      "required_evidence": {
+        "service_unhealthy": true,
+        "candidate_revision_approved": false,
+        "fallback_candidate_probe_healthy": true
       }
     },
     {

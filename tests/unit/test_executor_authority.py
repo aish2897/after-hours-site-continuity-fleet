@@ -58,7 +58,10 @@ def test_valid_stored_decision_passes():
         ({"incident_id": "INC-19990101-OTHER0"}, "decision_incident_mismatch"),
         ({"revoked": True}, "decision_revoked"),
         ({"decision": "DENIED"}, "decision_not_executable:DENIED"),
-        ({"decision": "APPROVAL_REQUIRED"}, "decision_not_executable:APPROVAL_REQUIRED"),
+                # An APPROVAL_REQUIRED decision is no longer categorically barred — it
+        # is executable on the strength of a verified human approval, and with
+        # no approval on file the refusal says exactly that.
+        ({"decision": "APPROVAL_REQUIRED"}, "no_approval_for_decision"),
         ({"action_type": "NOT_A_REAL_ACTION"}, "action_type_not_in_closed_enum"),
         ({"action_type": "EXPORT_CREDENTIALS"}, "unsupported_action_type:EXPORT_CREDENTIALS"),
         ({"action_type": "DISABLE_FIREWALL"}, "unsupported_action_type:DISABLE_FIREWALL"),
