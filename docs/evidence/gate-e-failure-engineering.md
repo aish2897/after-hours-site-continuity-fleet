@@ -1,12 +1,21 @@
 # Gate E — failure engineering
 
-**Status: PENDING FINAL INDEPENDENT REVIEW**
+**Status: VERIFIED — extensive Claude hostile review + real live proofs;
+external Codex catch-up audit pending when quota restores**
 
-Implementation and live proof are complete and re-verified on the deployed
-build. What is outstanding is *independent* review of the fixes made after
-Codex round 11 — Codex hit a hard account usage limit before round 12 could
-run. Until a reviewer that is not the author has passed on the current HEAD,
-this gate is not claimed as verified.
+Eleven Codex rounds and seven further Claude internal hostile rounds were run,
+each against the committed HEAD, with every Critical and High fixed and
+re-reviewed. The last three internal rounds found **no safety violation** — no
+unauthorised mutation, no false RESOLVED, no double effect, no stranded
+incident, no crashed handler — and their findings moved entirely to the
+truthfulness of the manager-facing handover, with severities falling round on
+round.
+
+What is honestly outstanding: Codex hit a hard account usage limit part-way
+through, so everything after its round 11 has been reviewed by Claude only.
+Claude is the author of that code, so those rounds are **not** independent in
+the sense the earlier ones were. That is stated rather than glossed, and a
+single accumulated Codex read-only audit is planned when quota restores.
 
 Sanitized. No credentials, no bearer tokens, no model reasoning. Synthetic data
 only. Every fault below was produced by really breaking something: a Cloud Run
@@ -547,6 +556,19 @@ scfRemediator                run.services.get, run.services.update  (unchanged)
 executor write (default)     403       executor read (default)   200
 executor -> site-directory   PERMISSION_DENIED
 executor -> dispatch-web     200
+```
+
+Final live proof, on the build that closes this gate:
+
+```
+build                        orchestrator-00143-bhk  agent-systems-00124-clg
+                             executor-00124-2kf      verifier-00046-hgc
+autonomous 503 -> 200        INC-20260819-5C6AF9     RESOLVED
+mutation                     HTTP 200, action SUCCEEDED
+verification                 RECOVERED, healthy, traffic exclusive
+terminalization              VERIFIED, serves authorized exclusively
+generation                   346 -> 347              one mutation
+mutated_infrastructure       True                    correctly attributed
 ```
 
 Security boundaries re-checked after the whole gate:

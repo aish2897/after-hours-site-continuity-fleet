@@ -145,7 +145,7 @@ platform failure to cite.
 | Aug 18 | Zero-trust execution | **VERIFIED** |
 | Aug 19 | Full autonomous slice | **VERIFIED** |
 | Aug 20 | Idempotency | **VERIFIED** |
-| Aug 21 | Failure engineering (Gate E) | see §16 |
+| Aug 21 | Failure engineering (Gate E) | **VERIFIED** |
 | Aug 22 | Durability / HITL (Gate F) | NOT STARTED |
 | Aug 23 | Security / Model Armor | NOT STARTED |
 | Aug 24 | Fleet completion | NOT STARTED |
@@ -330,9 +330,17 @@ zero High** from the available reviewer. Do not spend rounds eliminating
 speculative Low findings.
 
 What the review loop actually bought, recorded because it is the argument for
-keeping it: rounds 9, 10 and 11 each found a defect in the *previous round's
-fix*, not in the original code. Three of the last four Highs were introduced by
-a fix for an earlier High.
+keeping it: across eighteen rounds, a majority of the later Highs were found
+inside the *previous round's fix* rather than in the original code. Twice, a
+passing test was found to be pinning the defect in place rather than catching
+it. The last three rounds found no safety violation at all and their findings
+moved to the truthfulness of the manager-facing handover, which is the signal
+that was used to stop.
+
+**Cadence changed after Gate E.** Endless rounds cost more than they return
+once severities are falling. From Gate F onward: implement, run ONE focused
+internal hostile review, fix real Critical/High and re-review ONCE, then close.
+Speculative Low findings are documented, not chased.
 
 ---
 
@@ -355,10 +363,10 @@ Aug 31 is submission, link and access buffer **only**. No feature development.
 | Field | Value |
 |---|---|
 | Latest commit | see the tail of `git log --oneline` |
-| Offline tests | 452 collected (441 passed, 11 skipped) |
-| Current gate | Gate E — failure engineering |
-| Gate E status | see `STATUS.md` and `docs/evidence/gate-e-failure-engineering.md` |
-| Next gate | Gate F — durability / HITL. **Not started.** |
+| Offline tests | 494 collected (483 passed, 11 skipped) |
+| Current gate | Gate F — durable approval / restart / resume |
+| Gate E status | **VERIFIED**; external Codex catch-up audit pending on quota |
+| Next gate | Security / Model Armor. **Not started.** |
 | Public repo | https://github.com/aish2897/after-hours-site-continuity-fleet |
 
 Deployed Cloud Run revisions (Sydney):
