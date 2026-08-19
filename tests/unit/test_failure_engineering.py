@@ -2362,9 +2362,9 @@ def test_a_reconciled_landing_is_still_a_landing():
             if ln.strip() and not ln.strip().startswith("#")
         ]
         guard = code[-1]
-        assert guard == "if reported.progressed():", (
-            f"{name} path must credit a reconciled landing, not only a mutation; "
-            f"guard is {guard!r}"
+        assert guard == "if _authorized_effect_is_present(receipt, reported):", (
+            f"{name} path must ask whether OUR authorized effect is present — "
+            f"not merely whether this call mutated; guard is {guard!r}"
         )
 
 
@@ -2389,3 +2389,65 @@ def test_the_prefix_strip_loop_provably_terminates():
     ):
         assert body_is_healthy(body[:MAX_HEALTH_BODY_BYTES]) is False
     assert cloud_run_evidence.MAX_HEALTH_BODY_BYTES == 64 * 1024
+
+
+# --- Internal hostile review, round 6 ----------------------------------------
+
+
+def test_a_handover_never_contradicts_itself_about_a_landed_change():
+    """"A fix was applied" and "No change was made" in one document."""
+    from scf.app.main import ExecutionReceipt, _authorized_effect_is_present
+
+    for state in ("MUTATED", "VERIFIED", "MUTATION_REQUESTED"):
+        duplicate = {"executed": False, "mutated": False, "duplicate": True,
+                     "terminal": True, "state": state}
+        reported = ExecutionReceipt.model_validate(duplicate)
+        assert reported.progressed() is False, "this call itself changed nothing"
+        assert _authorized_effect_is_present(duplicate, reported) is True, (
+            f"the execution it collided with is at {state} — the flip landed"
+        )
+
+
+def test_an_operator_rollback_is_not_credited_to_the_automation():
+    """CASE B also fires on a first attempt that issued nothing at all."""
+    from scf.app.main import ExecutionReceipt, _authorized_effect_is_present
+
+    theirs = {"executed": True, "mutated": False, "reconciled": True,
+              "effect_predates_execution": True, "state": "MUTATED"}
+    ours = {"executed": True, "mutated": False, "reconciled": True,
+            "effect_predates_execution": False, "state": "MUTATED"}
+    assert _authorized_effect_is_present(
+        theirs, ExecutionReceipt.model_validate(theirs)
+    ) is False, "somebody else put the service there; do not claim it"
+    assert _authorized_effect_is_present(
+        ours, ExecutionReceipt.model_validate(ours)
+    ) is True
+
+    # The executor is what knows the difference, and must report it.
+    from scf.app import executor
+
+    source = inspect.getsource(executor.execute)
+    assert "effect_predates_execution" in source
+    assert "current_state == ExecutionState.CLAIMED.value" in source
+
+
+def test_no_category_reachable_after_a_mutation_claims_nothing_changed():
+    """The one contract-violation category that survives the traffic flip."""
+    from scf.domain.failures import FailureCategory, handling
+
+    post_mutation_reachable = {
+        FailureCategory.WORKER_CONTRACT_INVALID,   # malformed verifier/terminalize
+        FailureCategory.VERIFICATION_FAILED,
+        FailureCategory.VERIFIER_UNAVAILABLE,
+        FailureCategory.EXECUTION_OUTCOME_UNKNOWN,
+        FailureCategory.REMEDIATION_FAILED,
+    }
+    for category in post_mutation_reachable:
+        summary = handling(category).manager_summary
+        assert "Nothing was changed" not in summary, category
+        assert "nothing was changed" not in summary.lower(), category
+
+    # A genuinely pre-mutation category may still say it.
+    assert "nothing was changed" in handling(
+        FailureCategory.WORKER_TIMEOUT
+    ).manager_summary.lower()

@@ -465,7 +465,16 @@ async def execute(
     base["observed_traffic_allocation"] = observed["traffic_allocation"]
 
     if observed["active_revision"] == authorized_revision:
-        # CASE B: the mutation already landed, possibly before a crash.
+        # CASE B: the authorized revision is already live.
+        #
+        # Two different situations reach here and they must not be reported the
+        # same way. If this execution had already got as far as issuing its
+        # mutation, the effect is ours and predates a crash. If it is still at
+        # CLAIMED, we never issued anything — somebody else put the service
+        # where we wanted it, most likely an operator rolling back by hand. The
+        # workflow proceeds identically either way, because the desired state is
+        # present and authorized; the handover must not.
+        effect_predates_execution = current_state == ExecutionState.CLAIMED.value
         result, _ = await run_in_threadpool(
             _advance,
             ExecutionState.MUTATED,
@@ -487,6 +496,7 @@ async def execute(
             "mutated": False,
             "duplicate": False,
             "reconciled": True,
+            "effect_predates_execution": effect_predates_execution,
             "state": ExecutionState.MUTATED.value,
             **base,
         }

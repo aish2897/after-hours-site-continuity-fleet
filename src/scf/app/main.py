@@ -892,12 +892,7 @@ async def _run_remediation(
     # an authoritative writer, records what the executor reported.
     # Set before any bookkeeping, so a later failure cannot produce a handover
     # that says nothing changed about a mutation this receipt already reported.
-    if reported.progressed():
-        # `progressed()`, not `mutated`. Reconciliation observing that the
-        # authorized target is already live means the effect IS present — it
-        # was applied by an earlier execution of this same authorization. A
-        # handover that then says "no change was made" is wrong in the same way
-        # as before, just one branch over.
+    if _authorized_effect_is_present(receipt, reported):
         outcome["mutated_infrastructure"] = True
 
     if reported.duplicate:
@@ -1236,6 +1231,11 @@ class ExecutionReceipt(BaseModel):
 
     mutated: StrictBool = False
     reconciled: StrictBool = False
+    #: True when the authorized revision was ALREADY live before this execution
+    #: issued anything — an operator got there first. The effect is real, so the
+    #: workflow proceeds, but this automation did not cause it and must not tell
+    #: a duty manager that it did.
+    effect_predates_execution: StrictBool = False
     duplicate: StrictBool = False
     refused: StrictBool = False
     state: str | None = None
@@ -1340,6 +1340,31 @@ def _execution_already_landed(receipt: dict[str, Any]) -> bool:
     return str(reported.state or "") in LANDED_EXECUTION_STATES
 
 
+def _authorized_effect_is_present(
+    receipt: dict[str, Any], reported: ExecutionReceipt
+) -> bool:
+    """Did THIS automation put the authorized revision in place?
+
+    Three ways yes, and one trap.
+
+    Yes: we mutated; or reconciliation found our own earlier attempt had landed;
+    or this call was a duplicate and the execution it collided with has landed.
+    That third arm is used one screen down to decide whether the workflow may
+    proceed, and leaving it out here produced a handover carrying two flatly
+    contradictory sentences — "A fix was applied but the service still did not
+    come back correctly" beside "No change was made to any service" — with a
+    duty manager acting on the false one.
+
+    The trap: the executor also reports `reconciled` when it finds the
+    authorized revision already live on a FIRST attempt, having issued nothing.
+    The effect is real and the workflow should continue, but an operator put it
+    there. Claiming it would be the same overclaim pointing the other way.
+    """
+    if reported.effect_predates_execution:
+        return False
+    return reported.progressed() or _execution_already_landed(receipt)
+
+
 def _execution_may_still_land(receipt: dict[str, Any]) -> bool:
     """Did this call collide with a winner that has not mutated yet, but may?"""
     try:
@@ -1422,7 +1447,7 @@ async def reconcile_incident(
         # produced here told the manager "No change was made to any service"
         # about a mutation the executor had just reported as landed — and only
         # an unreachable verifier was needed to reach that.
-        if reported.progressed():
+        if _authorized_effect_is_present(receipt, reported):
             outcome["mutated_infrastructure"] = True
 
         if status is IncidentStatus.EXECUTION_FAILED:

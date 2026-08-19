@@ -112,8 +112,14 @@ HANDLING: dict[FailureCategory, FailureHandling] = {
     ),
     C.WORKER_CONTRACT_INVALID: _h(
         C.WORKER_CONTRACT_INVALID, S.ESCALATED, reconcilable=False, retry_eligible=False,
+        # No "Nothing was changed" here. This is the one contract-violation
+        # category reachable AFTER the traffic flip has landed — a malformed
+        # verifier or terminalization answer arrives once the mutation is done —
+        # so asserting it contradicted the same document's own record of the
+        # change. What did or did not change is reported by
+        # `what_automation_did`, which knows.
         summary="A checking step returned information the system could not trust, "
-                "so it was discarded. Nothing was changed.",
+                "so it was discarded and a person is needed.",
     ),
     C.INSUFFICIENT_EVIDENCE: _h(
         C.INSUFFICIENT_EVIDENCE, S.ESCALATED, reconcilable=False, retry_eligible=False,

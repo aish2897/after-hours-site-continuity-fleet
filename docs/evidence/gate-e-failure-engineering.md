@@ -592,7 +592,7 @@ all four services            healthy, fault_mode: null
 
 ## Tests
 
-**Offline: 475 passed, 11 skipped** — including 195 Gate E contract tests
+**Offline: 478 passed, 11 skipped** — including 198 Gate E contract tests
 covering fault-injection isolation, malformed model output at the parser,
 dangerous and unknown actions, call bounds, budget exhaustion, doing nothing,
 authenticated-but-invalid worker payloads, retry budgets, escalation-package
