@@ -89,6 +89,11 @@ capability beyond the state recorded here.
 | Caller loses a surviving executor → reconciled, one effect | **`VERIFIED`** | [`gate-e`](docs/evidence/gate-e-failure-engineering.md) |
 | Deterministic failure taxonomy + escalation package | **`VERIFIED`** | [`gate-e`](docs/evidence/gate-e-failure-engineering.md) |
 | No blind retry (every retry budget is zero) | **`VERIFIED`** | [`gate-e`](docs/evidence/gate-e-failure-engineering.md) |
+| Durable human approval surviving two process restarts | **`VERIFIED`** | [`gate-f`](docs/evidence/gate-f-durable-approval-resume.md) |
+| Approval bound to one decision by authorization fingerprint | **`VERIFIED`** | [`gate-f`](docs/evidence/gate-f-durable-approval-resume.md) |
+| Executor independently verifies human approval | **`VERIFIED`** | [`gate-f`](docs/evidence/gate-f-durable-approval-resume.md) |
+| Resume from Firestore by a process that never saw the incident | **`VERIFIED`** | [`gate-f`](docs/evidence/gate-f-durable-approval-resume.md) |
+| Resumable human approval | **`VERIFIED`** | [`gate-f`](docs/evidence/gate-f-durable-approval-resume.md) |
 | Ambiguous mutation outcome kept reconcilable (only 409 proves refusal) | `IMPLEMENTED` | `tests/unit/test_failure_engineering.py` · `tests/unit/test_lease_fencing.py` — no live non-409 failure has been produced by Google, so this is not claimed as verified |
 | Closed incident cannot be re-executed | **`VERIFIED`** | [`gate-d3`](docs/evidence/gate-d3-lease-fencing-cas.md) |
 | Reconciliation after an unreachable executor | **`VERIFIED`** | [`gate-d3`](docs/evidence/gate-d3-lease-fencing-cas.md) |
@@ -101,8 +106,7 @@ capability beyond the state recorded here.
 | Trusted/untrusted evidence separation | `IMPLEMENTED` | `tests/policy/test_decision_matrix.py` |
 | Cloud Trace end-to-end spans | `NOT INTEGRATED` | logging correlation only |
 | Model Armor | `NOT INTEGRATED` | Melbourne, next |
-| Resumable / crash-resumable workflow | `NOT INTEGRATED` | durable persistence only |
-| Resumable human approval | `NOT INTEGRATED` | — |
+| Approval state survives process replacement | **`VERIFIED`** | [`gate-f`](docs/evidence/gate-f-durable-approval-resume.md) — two orchestrator revisions replaced across one incident. A hard process kill mid-write is **not** proven: Cloud Run drains in-flight requests on redeploy |
 | Network / Security / Continuity runtimes | `NOT INTEGRATED` | systems only so far |
 | Duty-manager UI | `NOT INTEGRATED` | — |
 

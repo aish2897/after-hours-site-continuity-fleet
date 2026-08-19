@@ -69,7 +69,11 @@ def test_readme_does_not_claim_unproven_capabilities():
         "crash-resume",
         "Model Armor | **`VERIFIED`**",
         "Cloud Trace end-to-end spans | **`VERIFIED`**",
-        "Resumable human approval | **`VERIFIED`**",
+        # "Resumable human approval" was here until Gate F proved it live —
+        # WAITING_FOR_APPROVAL survived one orchestrator replacement, APPROVED
+        # survived another, and a third revision executed. See
+        # docs/evidence/gate-f-durable-approval-resume.md. Model Armor and Cloud
+        # Trace stay forbidden: neither is integrated.
     ]
     for claim in forbidden_verified:
         assert claim not in README, f"README over-claims: {claim}"

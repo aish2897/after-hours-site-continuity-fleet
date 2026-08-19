@@ -2038,6 +2038,40 @@ async def _execute_approved_decision(
         if effect_present is not False:
             outcome["mutated_infrastructure"] = effect_present
 
+        # Record the action here too. The audit trail is the artifact this
+        # project is judged on, and a resumed execution that mutated real
+        # infrastructure with no `action_executed` record would leave the story
+        # incomplete at exactly the step a person authorized.
+        if isinstance(receipt.get("action"), dict):
+            try:
+                action_record = ActionRecord.model_validate(receipt["action"])
+            except ValidationError as exc:
+                action_record = None
+                log_event(
+                    "action_record_unreadable",
+                    severity="ERROR",
+                    trace_id=trace_id,
+                    incident_id=incident_id,
+                    error_count=exc.error_count(),
+                )
+            if action_record is not None:
+                await run_in_threadpool(repo.record_action, incident_id, action_record)
+            await run_in_threadpool(
+                repo.append_audit,
+                incident_id,
+                actor="executor",
+                event="action_executed",
+                payload={
+                    "action_id": action_record.action_id if action_record else None,
+                    "decision_id": decision_id,
+                    "action_record_readable": action_record is not None,
+                    "resumed_after_approval": True,
+                    "accepted": reported.mutated,
+                },
+                actor_identity="sa-executor",
+                trace_id=trace_id,
+            )
+
         if not (reported.progressed() or _execution_already_landed(receipt)):
             await run_in_threadpool(
                 repo.transition,

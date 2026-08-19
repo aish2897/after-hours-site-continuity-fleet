@@ -893,7 +893,10 @@ def test_evidence_test_count_matches_the_actual_suite(request):
     root = Path(__file__).resolve().parents[2]
     # The newest gate's artifact states the CURRENT total; older ones state the
     # total as it stood at their own gate, which must not be rewritten.
-    evidence = (root / "docs/evidence/gate-e-failure-engineering.md").read_text(
+    # Update this to the NEWEST gate artifact each time a gate closes. Earlier
+    # artifacts keep the total as it stood at their own gate — rewriting them
+    # would be editing history to match today.
+    evidence = (root / "docs/evidence/gate-f-durable-approval-resume.md").read_text(
         encoding="utf-8"
     )
     claimed = re.search(r"\*\*Offline: (\d+) passed, (\d+) skipped\*\*", evidence)

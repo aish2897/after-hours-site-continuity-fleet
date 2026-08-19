@@ -127,7 +127,10 @@ real against Google infrastructure, with the artifact saved*.
 | Independent verifier (separate identity) | `docs/evidence/gate-d-autonomous-recovery.md` |
 | Terminal `VERIFIED` execution, replay cannot re-run | `docs/evidence/gate-d3-lease-fencing-cas.md` |
 | Hash-chained audit + tamper/truncation detection | `docs/evidence/gate-d3-lease-fencing-cas.md` |
-| Failure engineering (14 live fault scenarios) | `docs/evidence/gate-e-failure-engineering.md` |
+| Failure engineering (16 live fault scenarios) | `docs/evidence/gate-e-failure-engineering.md` |
+| Durable human approval across two process restarts | `docs/evidence/gate-f-durable-approval-resume.md` |
+| Approval bound to one decision by authorization fingerprint | `docs/evidence/gate-f-durable-approval-resume.md` |
+| Executor independently verifies human approval | `docs/evidence/gate-f-durable-approval-resume.md` |
 
 **Marked `IMPLEMENTED`, not verified:** ambiguous mutation-outcome handling.
 Google has never returned a non-409 failure here, so there is no live proof to
@@ -146,7 +149,7 @@ platform failure to cite.
 | Aug 19 | Full autonomous slice | **VERIFIED** |
 | Aug 20 | Idempotency | **VERIFIED** |
 | Aug 21 | Failure engineering (Gate E) | **VERIFIED** |
-| Aug 22 | Durability / HITL (Gate F) | NOT STARTED |
+| Aug 22 | Durability / HITL (Gate F) | **VERIFIED** |
 | Aug 23 | Security / Model Armor | NOT STARTED |
 | Aug 24 | Fleet completion | NOT STARTED |
 | Aug 25 | Agent registry / lifecycle | NOT STARTED |
@@ -161,8 +164,21 @@ platform failure to cite.
 
 ## 7. Next gates
 
-**Gate F — durability / HITL:** durable human approval, plus a real kill,
-redeploy and resume. Not started.
+**Gate F — durability / HITL: DONE.** A high-risk action now requires a person.
+The approval model:
+
+- The requirement comes from **trusted evidence**, never caller input. A blessed
+  `known-good` rollback stays AUTO_ALLOWED; moving traffic to an unblessed but
+  healthy revision is `SHIFT_TRAFFIC_TO_APPROVED_CANDIDATE` and needs a human.
+- Same mutation primitive, same revision pinning, same OCC, same scoped
+  identity, same verifier. Nothing was added to the blast radius to create risk.
+- The approval lives in `(default)` beside the decision, bound by the
+  authorization fingerprint. Change the action, target, revision, policy version
+  or evidence snapshot and the approval no longer applies.
+- The **executor verifies the approval itself**. Cloud Run invoker permission is
+  not authorization.
+- Proven across two process replacements: WAITING survived one, APPROVED
+  survived another, and a third revision executed.
 
 Then, in order: Model Armor and security · full fleet · runtime registry and
 lifecycle · manager UI · meaningful multimodal screenshot routing · Cloud Trace
@@ -285,6 +301,14 @@ Stated plainly, in the repo as well as here:
     the wrong gate. It requires an independent verifier verdict, the executor's
     own re-observation, and a CAS on the expected state.
 12. **Ambiguous mutation-outcome handling has no live platform proof.**
+13. **The approver is a named demo principal.** Google populates
+    `X-Goog-Authenticated-User-Email` only for end-user credentials, and this
+    fleet uses service-to-service tokens, so no real human principal reaches the
+    container yet. Binding a signed-in manager identity belongs with the UI.
+14. **The approval endpoint is authenticated, not role-authorized.** Any
+    principal Google lets invoke the orchestrator may approve;
+    `required_approval_role` is recorded, not enforced against the caller.
+15. **Approval expiry is enforced on read, not swept.**
 
 ---
 
@@ -363,10 +387,11 @@ Aug 31 is submission, link and access buffer **only**. No feature development.
 | Field | Value |
 |---|---|
 | Latest commit | see the tail of `git log --oneline` |
-| Offline tests | 494 collected (483 passed, 11 skipped) |
-| Current gate | Gate F — durable approval / restart / resume |
+| Offline tests | 515 collected (504 passed, 11 skipped) |
+| Current gate | Gate F closed |
 | Gate E status | **VERIFIED**; external Codex catch-up audit pending on quota |
-| Next gate | Security / Model Armor. **Not started.** |
+| Gate F status | **VERIFIED**; same Codex catch-up audit pending |
+| Next gate | Aug 23 — Security / Model Armor. **Not started.** |
 | Public repo | https://github.com/aish2897/after-hours-site-continuity-fleet |
 
 Deployed Cloud Run revisions (Sydney):
