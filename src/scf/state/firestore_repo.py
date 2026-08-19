@@ -403,6 +403,29 @@ class IncidentRepository:
 
         return _apply(transaction)
 
+    def attach_approval_to_decision(
+        self, incident_id: str, decision_id: str, approval_id: str
+    ) -> None:
+        """Record which approval was raised for this decision, on the decision.
+
+        The executor holds `datastore.entities.get` and NOT `datastore.entities
+        .list` — it can fetch a document by id and cannot run a query. That is
+        the two-plane isolation working exactly as designed, and it is not
+        something to widen for convenience: an identity that can enumerate the
+        authoritative plane is a materially different identity.
+
+        So the reference is written here, by the authoritative writer, into the
+        document the executor already reads. The executor still verifies the
+        approval's state and fingerprint for itself; it is being told where to
+        look, not what to conclude.
+        """
+        (
+            self._doc_ref(incident_id)
+            .collection(DECISIONS)
+            .document(decision_id)
+            .update({"approval_id": approval_id})
+        )
+
     def find_approval_for_decision(self, incident_id: str, decision_id: str) -> str:
         """The approval raised for one decision, or "" if there is none.
 

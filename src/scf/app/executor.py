@@ -249,13 +249,15 @@ def _approval_blocks_execution(decision: dict[str, Any], incident_id: str) -> st
     and evidence snapshot together, so an approval cannot be carried across to a
     different decision, a different revision, or a re-issued authorization.
     """
-    repo = authoritative()
-    decision_id = str(decision.get("decision_id") or "")
-    approval_id = repo.find_approval_for_decision(incident_id, decision_id)
+    # From the decision document this identity already read. A query would be
+    # refused — `scfDecisionReader` grants `datastore.entities.get` and not
+    # `list` — and that refusal is the isolation boundary, not an obstacle to
+    # route around.
+    approval_id = str(decision.get("approval_id") or "")
     if not approval_id:
         return "no_approval_for_decision"
     try:
-        approval = repo.get_approval(approval_id)
+        approval = authoritative().get_approval(approval_id)
     except ApprovalNotFound:
         return "approval_not_found"
     if approval.get("state") != "APPROVED":

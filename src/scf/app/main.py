@@ -880,6 +880,12 @@ async def _run_remediation(
             trace_id=trace_id,
         )
         await run_in_threadpool(
+            repo.attach_approval_to_decision,
+            incident_id,
+            policy_decision.decision_id,
+            approval_id,
+        )
+        await run_in_threadpool(
             repo.transition,
             incident_id,
             IncidentStatus.WAITING_FOR_APPROVAL,
@@ -1910,11 +1916,11 @@ async def resume_incident(
     if not decision:
         raise HTTPException(status_code=409, detail="no_decision_to_resume")
 
-    approval_id = str(incident.get("approval_id") or "")
+    # The decision carries the reference, written by the authoritative writer.
+    # The query below is a fallback for a decision recorded before that existed;
+    # the orchestrator may run it, the executor may not.
+    approval_id = str(decision.get("approval_id") or "")
     if not approval_id:
-        approval_id = str(decision.get("approval_id") or "")
-    if not approval_id:
-        # Fall back to the approval that names this decision.
         approval_id = await run_in_threadpool(
             repo.find_approval_for_decision, incident_id, decision["decision_id"]
         )
