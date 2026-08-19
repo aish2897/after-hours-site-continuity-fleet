@@ -335,6 +335,35 @@ the incidents a human had touched.
 
 ---
 
+## Re-proved on the reviewed build
+
+Every fix above was redeployed and the gate re-run end to end, so the evidence
+describes the code that is actually running.
+
+```
+REVISION A   scf-orchestrator-00151-ff8    REVISION B   scf-orchestrator-00152-gj9
+REVISION C   scf-orchestrator-00153-4pf    executor     scf-executor-00128-q2v
+
+rejection path    INC-20260819-62D18A  -> WAITING_FOR_APPROVAL
+                  human REJECT          -> incident ESCALATED, 14 audit records,
+                                           handover written, generation 350 unchanged
+
+approval path     INC-20260819-2D4B3B  -> WAITING_FOR_APPROVAL   (revision A)
+                  read back on revision B: WAITING_FOR_APPROVAL, approval PENDING
+                  approve on revision B, WITH a spoofed
+                    X-Goog-Authenticated-User-Email: attacker@evil.example
+                    -> approver recorded as demo-approver@...invalid  (header ignored)
+                  revision C deployed
+                  resume on revision C  -> decision DEC-DD6E585316
+                                           mutation HTTP 200, conflict false
+                                           RECOVERED / VERIFIED / RESOLVED
+                  target 503 -> 200        generation 350 -> 351   one mutation
+                  resume again          -> {resumed: false,
+                                            blockers: [incident_state:RESOLVED]}
+```
+
+---
+
 ## Tests
 
 **Offline: 507 passed, 11 skipped** — including 24 Gate F contract tests
