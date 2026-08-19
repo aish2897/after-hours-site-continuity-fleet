@@ -423,6 +423,11 @@ async def execute(
             "executed": False,
             "mutated": False,
             "duplicate": True,
+            # Inherited, so a duplicate cannot claim work the record it collided
+            # with has already disclaimed.
+            "effect_predates_execution": bool(
+                (record or {}).get("effect_predates_execution")
+            ),
             "terminal": outcome == ALREADY_FINISHED,
             "state": (record or {}).get(
                 "state", ActionState.DUPLICATE_SUPPRESSED.value
@@ -474,12 +479,25 @@ async def execute(
         # where we wanted it, most likely an operator rolling back by hand. The
         # workflow proceeds identically either way, because the desired state is
         # present and authorized; the handover must not.
-        effect_predates_execution = current_state == ExecutionState.CLAIMED.value
+        # "Did this execution issue anything?", not "is it exactly CLAIMED?".
+        # PRECONDITION_CHECKED is written BEFORE the Cloud Run call and is
+        # reached with certainty by the 409 rewind — a write Google provably
+        # refused — so testing one state let the second look credit us with an
+        # operator's rollback.
+        #
+        # And it is remembered. A CASE B that correctly disclaims authorship
+        # writes MUTATED; without persisting the disclaimer, the very next
+        # reconcile reads MUTATED, sees an attempted state, and claims the work
+        # after all. The record has to carry what it knows.
+        effect_predates_execution = bool(
+            (record or {}).get("effect_predates_execution")
+        ) or current_state not in ATTEMPTED_STATES
         result, _ = await run_in_threadpool(
             _advance,
             ExecutionState.MUTATED,
             expect_states=PRE_MUTATION_STATES,
             reconciled=True,
+            effect_predates_execution=effect_predates_execution,
             observed_active_revision=observed["active_revision"],
         )
         if result != ADVANCED:

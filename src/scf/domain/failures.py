@@ -148,9 +148,9 @@ HANDLING: dict[FailureCategory, FailureHandling] = {
         # We could not reach the component that acts, so whether it acted is
         # unknown. Never close an incident on an unknown outcome.
         C.EXECUTOR_UNAVAILABLE, S.EXECUTION_FAILED, reconcilable=True, retry_eligible=True,
-        summary="The system could not reach the part of itself that applies fixes. "
-                "The outcome is being re-checked before anything is reported as "
-                "done.",
+        summary="The system could not reach the part of itself that applies "
+                "fixes, so the outcome is unknown and nothing is being reported "
+                "as done until it is re-checked.",
     ),
     C.APPROVAL_REQUIRED_NO_APPROVER: _h(
         # The gate did its job: this action needs a person. But there is no
@@ -174,17 +174,24 @@ HANDLING: dict[FailureCategory, FailureHandling] = {
         C.EXECUTION_OUTCOME_UNKNOWN, S.EXECUTION_FAILED,
         reconcilable=True, retry_eligible=False,
         summary="A repair was sent but the system could not confirm whether it "
-                "took effect, so it is checking rather than reporting a result.",
+                "took effect, so no result is being reported until it is "
+                "re-checked.",
     ),
     C.VERIFIER_UNAVAILABLE: _h(
         C.VERIFIER_UNAVAILABLE, S.REMEDIATION_FAILED, reconcilable=True, retry_eligible=False,
-        summary="A fix was applied but could not be independently confirmed yet, "
-                "so this is not being reported as resolved until it is.",
+        # Not "a fix was applied". This is reachable when the service reached
+        # the intended state without this automation doing it — an operator
+        # rolling back by hand gets there first — and asserting authorship then
+        # is the same overclaim, pointing the other way. What the automation did
+        # or did not do is reported by `what_automation_did`, which knows.
+        summary="The service is in the intended state, but that could not be "
+                "independently confirmed yet, so it is not being reported as "
+                "resolved until it is.",
     ),
     C.VERIFICATION_FAILED: _h(
         C.VERIFICATION_FAILED, S.ESCALATED, reconcilable=False, retry_eligible=False,
-        summary="A fix was applied but the service still did not come back "
-                "correctly, so a person is needed.",
+        summary="The intended fix did not bring the service back correctly, "
+                "so a person is needed.",
     ),
     C.REMEDIATION_FAILED: _h(
         C.REMEDIATION_FAILED, S.ESCALATED, reconcilable=False, retry_eligible=False,
@@ -240,10 +247,18 @@ NEXT_ACTION: dict[FailureCategory, str] = {
     C.STALE_EVIDENCE: "Re-report the problem if it is still happening.",
     C.TARGET_NO_LONGER_HEALTHY: "Contact technical support and quote the reference below.",
     C.EXECUTION_CONFLICT: "Re-report the problem if it is still happening.",
-    C.EXECUTOR_UNAVAILABLE: "No action needed yet. Re-report if the problem continues.",
-    C.EXECUTION_OUTCOME_UNKNOWN: "No action needed yet. The result is still being confirmed.",
+    # These three say what a person must actually do. The previous wording —
+    # "No action needed yet", "the result is still being confirmed" — described
+    # a process in flight. There is none: reconciliation is operator-triggered
+    # and nothing sweeps, so an incident rests until a human runs it. "No action
+    # needed" is the one sentence that stops someone chasing it.
+    C.EXECUTOR_UNAVAILABLE: "Ask an operator to run reconciliation on this "
+                            "reference, and re-report if the problem continues.",
+    C.EXECUTION_OUTCOME_UNKNOWN: "Ask an operator to run reconciliation on this "
+                                 "reference to confirm the result.",
     C.APPROVAL_REQUIRED_NO_APPROVER: "Contact the on-call incident commander to authorize this repair.",
-    C.VERIFIER_UNAVAILABLE: "No action needed yet. Confirmation is still in progress.",
+    C.VERIFIER_UNAVAILABLE: "Ask an operator to run reconciliation on this "
+                            "reference to complete confirmation.",
     C.VERIFICATION_FAILED: "Contact technical support and quote the reference below.",
     C.REMEDIATION_FAILED: "Contact technical support and quote the reference below.",
 }

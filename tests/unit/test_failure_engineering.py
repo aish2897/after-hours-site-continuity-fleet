@@ -2138,8 +2138,8 @@ def test_an_unreadable_action_record_does_not_lose_a_landed_mutation():
     assert "except ValidationError" in source[source.index('receipt["action"]'):]
     # And the mutation is recorded in the outcome BEFORE any bookkeeping runs,
     # so no later failure can produce a handover that says nothing changed.
-    assert source.index('outcome["mutated_infrastructure"] = True') < source.index(
-        "repo.record_action"
+    assert source.index('outcome["mutated_infrastructure"] = effect_present') < (
+        source.index("repo.record_action")
     )
 
 
@@ -2355,17 +2355,18 @@ def test_a_reconciled_landing_is_still_a_landing():
     primary = inspect.getsource(main._run_remediation)
     recovery = inspect.getsource(main.reconcile_incident)
     for name, source in (("primary", primary), ("recovery", recovery)):
-        window = source[: source.index('outcome["mutated_infrastructure"] = True')]
+        window = source[: source.index('outcome["mutated_infrastructure"] = effect_present')]
         code = [
             ln.strip()
             for ln in window.splitlines()
             if ln.strip() and not ln.strip().startswith("#")
         ]
         guard = code[-1]
-        assert guard == "if _authorized_effect_is_present(receipt, reported):", (
-            f"{name} path must ask whether OUR authorized effect is present — "
-            f"not merely whether this call mutated; guard is {guard!r}"
+        assert guard == "if effect_present is not False:", (
+            f"{name} path must record the tri-state answer, so an uncertain "
+            f"landing stays uncertain; guard is {guard!r}"
         )
+        assert "_authorized_effect_is_present(receipt, reported)" in source
 
 
 def test_the_prefix_strip_loop_provably_terminates():
@@ -2398,7 +2399,7 @@ def test_a_handover_never_contradicts_itself_about_a_landed_change():
     """"A fix was applied" and "No change was made" in one document."""
     from scf.app.main import ExecutionReceipt, _authorized_effect_is_present
 
-    for state in ("MUTATED", "VERIFIED", "MUTATION_REQUESTED"):
+    for state in ("MUTATED", "VERIFIED"):
         duplicate = {"executed": False, "mutated": False, "duplicate": True,
                      "terminal": True, "state": state}
         reported = ExecutionReceipt.model_validate(duplicate)
@@ -2406,6 +2407,16 @@ def test_a_handover_never_contradicts_itself_about_a_landed_change():
         assert _authorized_effect_is_present(duplicate, reported) is True, (
             f"the execution it collided with is at {state} — the flip landed"
         )
+
+    # MUTATION_REQUESTED is written BEFORE the Cloud Run call, so colliding
+    # with it is not evidence a change was made — only that one may have been.
+    # Good enough to let the workflow proceed and to refuse a re-fire; not good
+    # enough to tell a duty manager anything as fact.
+    maybe = {"executed": False, "mutated": False, "duplicate": True,
+             "terminal": False, "state": "MUTATION_REQUESTED"}
+    assert _authorized_effect_is_present(
+        maybe, ExecutionReceipt.model_validate(maybe)
+    ) is None
 
 
 def test_an_operator_rollback_is_not_credited_to_the_automation():
@@ -2428,7 +2439,12 @@ def test_an_operator_rollback_is_not_credited_to_the_automation():
 
     source = inspect.getsource(executor.execute)
     assert "effect_predates_execution" in source
-    assert "current_state == ExecutionState.CLAIMED.value" in source
+    # "Did this execution issue anything", not one state equality. Testing for
+    # CLAIMED alone missed PRECONDITION_CHECKED — written before the Cloud Run
+    # call and reached by the 409 rewind — and this assertion USED to require
+    # the narrow form, locking the defect in place.
+    assert "current_state not in ATTEMPTED_STATES" in source
+    assert "current_state == ExecutionState.CLAIMED.value" not in source
 
 
 def test_no_category_reachable_after_a_mutation_claims_nothing_changed():
@@ -2451,3 +2467,77 @@ def test_no_category_reachable_after_a_mutation_claims_nothing_changed():
     assert "nothing was changed" in handling(
         FailureCategory.WORKER_TIMEOUT
     ).manager_summary.lower()
+
+
+# --- Internal hostile review, round 7 ----------------------------------------
+
+
+def test_authorship_survives_a_second_look():
+    """A disclaimer that is not persisted is retracted by the next reconcile."""
+    from scf.app import executor
+
+    source = inspect.getsource(executor.execute)
+    # Computed from the record as well as the current state...
+    assert '(record or {}).get("effect_predates_execution")' in source
+    # ...persisted when CASE B writes MUTATED...
+    assert "effect_predates_execution=effect_predates_execution" in source
+    # ...and inherited by a duplicate that collides with that record.
+    duplicate_branch = source[: source.index('"duplicate": True,') + 400]
+    assert "effect_predates_execution" in duplicate_branch
+
+
+def test_a_precondition_checked_execution_issued_nothing():
+    """The 409 rewind lands here, and a 409 is proof nothing was applied."""
+    from scf.app.executor import ATTEMPTED_STATES
+    from scf.domain.enums import ExecutionState
+
+    assert ExecutionState.PRECONDITION_CHECKED.value not in ATTEMPTED_STATES
+    assert ExecutionState.CLAIMED.value not in ATTEMPTED_STATES
+    assert ExecutionState.MUTATION_REQUESTED.value in ATTEMPTED_STATES
+    assert ExecutionState.MUTATED.value in ATTEMPTED_STATES
+
+
+def test_an_uncertain_landing_is_reported_as_uncertain():
+    from scf.app.main import UNCERTAIN_EXECUTION_STATES, LANDED_EXECUTION_STATES
+    from scf.domain.failures import FailureCategory, build_escalation_package
+
+    assert UNCERTAIN_EXECUTION_STATES < LANDED_EXECUTION_STATES
+    assert "MUTATION_REQUESTED" in UNCERTAIN_EXECUTION_STATES
+
+    package = build_escalation_package(
+        incident_id="INC-1", category=FailureCategory.VERIFIER_UNAVAILABLE,
+        correlation_id=None, specialists_attempted=[], evidence_keys=[],
+        mutated=None, current_service_state="unknown", operations_restored=False,
+    )
+    assert package.automation_changed_anything is None
+    assert "could not confirm" in package.what_automation_did
+
+
+def test_no_summary_asserts_authorship_it_cannot_support():
+    """A fix "was applied" only if this automation applied it."""
+    from scf.domain.failures import FailureCategory, handling
+
+    # Reachable when an operator put the service right before we acted.
+    for category in (FailureCategory.VERIFIER_UNAVAILABLE,
+                     FailureCategory.VERIFICATION_FAILED):
+        summary = handling(category).manager_summary
+        assert "A fix was applied" not in summary, category
+        assert "a fix was applied" not in summary.lower(), category
+
+
+def test_the_manager_is_told_who_has_to_act():
+    """Nothing sweeps. "No action needed yet" stops someone chasing it."""
+    from scf.domain.failures import NEXT_ACTION, FailureCategory, handling
+
+    for category in (FailureCategory.EXECUTOR_UNAVAILABLE,
+                     FailureCategory.EXECUTION_OUTCOME_UNKNOWN,
+                     FailureCategory.VERIFIER_UNAVAILABLE):
+        action = NEXT_ACTION[category]
+        assert "No action needed" not in action, category
+        assert "operator" in action.lower(), category
+
+    # And no summary describes a confirmation process that does not exist.
+    for category in FailureCategory:
+        summary = handling(category).manager_summary.lower()
+        assert "is being re-checked" not in summary, category
+        assert "is checking" not in summary, category

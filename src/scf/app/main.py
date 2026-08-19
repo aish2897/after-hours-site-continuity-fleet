@@ -588,7 +588,7 @@ async def _fail_unguarded(
         correlation_id=trace_id,
         specialists_attempted=outcome.get("specialists_attempted", []),
         evidence_keys=outcome.get("evidence_keys", []),
-        mutated=bool(outcome.get("mutated_infrastructure")),
+        mutated=outcome.get("mutated_infrastructure"),
         current_service_state=observed["state"],
         operations_restored=observed["restored"],
     ).model_dump(mode="json")
@@ -892,8 +892,9 @@ async def _run_remediation(
     # an authoritative writer, records what the executor reported.
     # Set before any bookkeeping, so a later failure cannot produce a handover
     # that says nothing changed about a mutation this receipt already reported.
-    if _authorized_effect_is_present(receipt, reported):
-        outcome["mutated_infrastructure"] = True
+    effect_present = _authorized_effect_is_present(receipt, reported)
+    if effect_present is not False:
+        outcome["mutated_infrastructure"] = effect_present
 
     if reported.duplicate:
         await run_in_threadpool(
@@ -1308,6 +1309,12 @@ class TerminalizationReceipt(BaseModel):
 #: by somebody. Reconciliation must not read these as failure.
 LANDED_EXECUTION_STATES = frozenset({"MUTATED", "VERIFIED", "MUTATION_REQUESTED"})
 
+#: Of those, the one that only means the mutation MIGHT have been issued. It is
+#: written before the Cloud Run call, which is why terminalization refuses it.
+#: Good enough to let the workflow proceed and to refuse a re-fire; not good
+#: enough to tell a duty manager a change was made.
+UNCERTAIN_EXECUTION_STATES = frozenset({"MUTATION_REQUESTED"})
+
 #: States a duplicate can collide with where the winner has NOT yet mutated but
 #: is alive and authorized to. Neither "landed" nor "failed" — unknown.
 #:
@@ -1342,7 +1349,7 @@ def _execution_already_landed(receipt: dict[str, Any]) -> bool:
 
 def _authorized_effect_is_present(
     receipt: dict[str, Any], reported: ExecutionReceipt
-) -> bool:
+) -> bool | None:
     """Did THIS automation put the authorized revision in place?
 
     Three ways yes, and one trap.
@@ -1362,7 +1369,20 @@ def _authorized_effect_is_present(
     """
     if reported.effect_predates_execution:
         return False
-    return reported.progressed() or _execution_already_landed(receipt)
+    if reported.progressed():
+        return True
+    if not _execution_already_landed(receipt):
+        return False
+    if str(reported.state or "") in UNCERTAIN_EXECUTION_STATES:
+        # `None`, not `True`. MUTATION_REQUESTED is written *before* the Cloud
+        # Run call — the codebase says so in three places and terminalization
+        # refuses it for exactly this reason — so the worker we collided with
+        # may have been refused with a 409, or errored, or not got there at all.
+        # One predicate was answering two questions with different thresholds:
+        # "may the workflow proceed?" and "may we assert this happened?". Only
+        # the first tolerates a maybe.
+        return None
+    return True
 
 
 def _execution_may_still_land(receipt: dict[str, Any]) -> bool:
@@ -1447,7 +1467,15 @@ async def reconcile_incident(
         # produced here told the manager "No change was made to any service"
         # about a mutation the executor had just reported as landed — and only
         # an unreachable verifier was needed to reach that.
-        if _authorized_effect_is_present(receipt, reported):
+        effect_present = _authorized_effect_is_present(receipt, reported)
+        if effect_present is not False:
+            outcome["mutated_infrastructure"] = effect_present
+        elif status is IncidentStatus.REMEDIATION_FAILED:
+            # This call changed nothing, but the incident only reaches
+            # REMEDIATION_FAILED by way of EXECUTED — a mutation landed on an
+            # earlier call. The outcome dict is rebuilt per request, so without
+            # this the handover denied a change the incident's own history
+            # records.
             outcome["mutated_infrastructure"] = True
 
         if status is IncidentStatus.EXECUTION_FAILED:
