@@ -299,12 +299,19 @@ def _identity(decision: dict[str, Any], incident_id: str, decision_id: str) -> t
     return execution_id, fingerprint
 
 
-def _observe(service: str) -> dict[str, Any]:
+def _observe(service: str, authorized_revision: str = "") -> dict[str, Any]:
     """Read real infrastructure. Used for precondition and reconciliation.
 
-    Also re-probes the operator-approved candidate through its own tag URL, so
-    freshness of the rollback target is established at execution time rather
-    than inherited from an investigation that may be minutes old.
+    Also re-probes the target through its own tag URL, so freshness is
+    established at execution time rather than inherited from an investigation
+    that may be minutes old.
+
+    Which target depends on what was authorized. A rollback is authorized
+    against the operator's `known-good` tag and must still find it there — an
+    operator who withdraws the tag has withdrawn the premise. A human-approved
+    shift is authorized against one exact revision the person was shown, so the
+    check is that *that* revision is still addressable and still healthy,
+    whatever tag carries it.
     """
     described = describe_service(service)
     allocation = traffic_allocation(described)
@@ -313,13 +320,20 @@ def _observe(service: str) -> dict[str, Any]:
     candidate_revision = ""
     candidate_uri = ""
     for entry in described.get("trafficStatuses") or []:
+        revision = (entry.get("revision") or "").rsplit("/", 1)[-1]
         if entry.get("tag") == KNOWN_GOOD_TAG:
-            candidate_revision = (entry.get("revision") or "").rsplit("/", 1)[-1]
+            candidate_revision = revision
             candidate_uri = entry.get("uri") or ""
             break
+        # No blessed tag: accept the exact authorized revision if it is still
+        # addressable. Never a substitute — only the revision already pinned in
+        # the decision a human approved.
+        if authorized_revision and revision == authorized_revision and entry.get("uri"):
+            candidate_revision = revision
+            candidate_uri = entry.get("uri") or ""
 
     candidate_status, candidate_body = (
-        probe_health(candidate_uri) if candidate_uri else (0, "no known-good tag")
+        probe_health(candidate_uri) if candidate_uri else (0, "no addressable candidate")
     )
     status_code, body = probe_health(described.get("uri", ""))
     return {
@@ -527,7 +541,7 @@ async def execute(
 
     # Reconcile against real infrastructure before touching anything. This is
     # what closes the crash window: we never assume what a dead process did.
-    observed = await run_in_threadpool(_observe, target_ref)
+    observed = await run_in_threadpool(_observe, target_ref, authorized_revision)
     base["observed_active_revision"] = observed["active_revision"]
     base["observed_traffic_allocation"] = observed["traffic_allocation"]
 
