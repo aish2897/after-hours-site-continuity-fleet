@@ -39,6 +39,8 @@ class FailureCategory(StrEnum):
     EXECUTOR_UNAVAILABLE = "EXECUTOR_UNAVAILABLE"
     EXECUTION_OUTCOME_UNKNOWN = "EXECUTION_OUTCOME_UNKNOWN"
     APPROVAL_REQUIRED_NO_APPROVER = "APPROVAL_REQUIRED_NO_APPROVER"
+    APPROVAL_REJECTED = "APPROVAL_REJECTED"
+    APPROVAL_EXPIRED = "APPROVAL_EXPIRED"
     VERIFIER_UNAVAILABLE = "VERIFIER_UNAVAILABLE"
     VERIFICATION_FAILED = "VERIFICATION_FAILED"
     REMEDIATION_FAILED = "REMEDIATION_FAILED"
@@ -163,6 +165,21 @@ HANDLING: dict[FailureCategory, FailureHandling] = {
         summary="This repair needs a person to authorize it, and the approval "
                 "step is not available yet, so nothing was changed.",
     ),
+    C.APPROVAL_REJECTED: _h(
+        # A person said no. That is a legitimate, complete answer — and it still
+        # has to go somewhere. Recording the rejection on the approval document
+        # and leaving the incident waiting meant "ESCALATE INSTEAD" escalated
+        # nothing: no status change, no handover, and a live outage sitting in a
+        # state no endpoint could move.
+        C.APPROVAL_REJECTED, S.ESCALATED, reconcilable=False, retry_eligible=False,
+        summary="A person reviewed the proposed repair and decided not to apply "
+                "it, so nothing was changed and the incident is with them.",
+    ),
+    C.APPROVAL_EXPIRED: _h(
+        C.APPROVAL_EXPIRED, S.ESCALATED, reconcilable=False, retry_eligible=False,
+        summary="The proposed repair was not approved in time, so it was not "
+                "applied. Nothing was changed.",
+    ),
     C.EXECUTION_OUTCOME_UNKNOWN: _h(
         # The mutation was issued and Google answered with something other than
         # a 409. Only a 409 ABORTED is proof the write was refused; every other
@@ -257,6 +274,10 @@ NEXT_ACTION: dict[FailureCategory, str] = {
     C.EXECUTION_OUTCOME_UNKNOWN: "Ask an operator to run reconciliation on this "
                                  "reference to confirm the result.",
     C.APPROVAL_REQUIRED_NO_APPROVER: "Contact the on-call incident commander to authorize this repair.",
+    C.APPROVAL_REJECTED: "No further automatic action will be taken. Contact "
+                         "technical support if the site is still affected.",
+    C.APPROVAL_EXPIRED: "Report the problem again if the site is still affected, "
+                        "so a fresh repair can be proposed.",
     C.VERIFIER_UNAVAILABLE: "Ask an operator to run reconciliation on this "
                             "reference to complete confirmation.",
     C.VERIFICATION_FAILED: "Contact technical support and quote the reference below.",

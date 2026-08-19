@@ -1713,20 +1713,39 @@ DEMO_APPROVER_PRINCIPAL = os.environ.get(
 )
 
 
-def _approver_principal(assertion: str | None, email: str | None) -> str:
-    """Who approved, from what the platform actually asserts.
+#: Set only on a deployment that actually has Identity-Aware Proxy in front of
+#: the service. Without IAP, `X-Goog-Authenticated-User-Email` is an ordinary
+#: request header that any caller may set, so trusting it would let anyone who
+#: can invoke this service write an arbitrary named person into the audit record
+#: as the human who authorized a production change.
+TRUST_PLATFORM_APPROVER_HEADERS = (
+    os.environ.get("SCF_TRUST_IAP_HEADERS", "").strip().lower() == "true"
+)
 
-    `X-Goog-Authenticated-User-Email` is set by Google in front of the
-    container and cannot be forged by the caller when the service requires
-    authentication — but it is only populated for end-user credentials, not for
-    the service-to-service tokens this fleet uses. So it is read when present,
-    and when it is absent the answer is a named demo principal rather than
-    anything taken from a caller-supplied header.
+
+def _approver_principal(assertion: str | None, email: str | None) -> str:
+    """Who approved — recorded only from something that cannot be self-asserted.
+
+    An earlier version of this read `X-Goog-Authenticated-User-Email` directly
+    and claimed in a comment that Google set it and a caller could not forge it.
+    That is true behind IAP and false otherwise, and this fleet does not deploy
+    IAP: the header arrives verbatim from whoever sent it. Any principal able to
+    invoke the orchestrator could therefore name any person as the approver in a
+    hash-chained audit record.
+
+    It grants no authority a caller did not already have — any invoker may
+    approve today, which is a stated limitation — but the record that *a person
+    decided* is the artifact this gate is judged on, and attribution has to be
+    worth as much as the rest of the trail.
+
+    So the headers are read only where a deployment declares IAP is genuinely in
+    front. Otherwise a named placeholder is recorded, which claims nothing.
     """
-    if email:
-        return email.split(":", 1)[-1]
-    if assertion:
-        return "authenticated-principal (assertion present)"
+    if TRUST_PLATFORM_APPROVER_HEADERS:
+        if email:
+            return email.split(":", 1)[-1]
+        if assertion:
+            return "iap-authenticated-principal"
     return DEMO_APPROVER_PRINCIPAL
 
 
@@ -1776,6 +1795,24 @@ async def _record_approval_decision(
             actor_identity=approver,
             trace_id=trace_id,
         )
+
+    # A refusal is a complete answer, and it still has to go somewhere. Recording
+    # it only on the approval document left the incident waiting forever: the
+    # manager was offered "ESCALATE INSTEAD" and pressing it escalated nothing —
+    # no status change, no handover, a live outage in a state no endpoint could
+    # move. The same is true of a request nobody answered in time.
+    if outcome in ("DECIDED", "EXPIRED") and state != "APPROVED":
+        await _close_unapproved_incident(
+            record["incident_id"],
+            category=(
+                FailureCategory.APPROVAL_REJECTED
+                if outcome == "DECIDED"
+                else FailureCategory.APPROVAL_EXPIRED
+            ),
+            approval_id=approval_id,
+            approver=approver,
+            trace_id=trace_id,
+        )
     return {
         "approval_id": approval_id,
         "outcome": outcome,
@@ -1785,6 +1822,56 @@ async def _record_approval_decision(
         "approver_principal": record.get("approver_principal"),
         "decided_at": record.get("decided_at"),
     }
+
+
+async def _close_unapproved_incident(
+    incident_id: str,
+    *,
+    category: FailureCategory,
+    approval_id: str,
+    approver: str,
+    trace_id: str | None,
+) -> None:
+    """Walk a refused or lapsed incident to a terminal state, with a handover.
+
+    Best-effort by design: the human's decision is already durably recorded on
+    the approval document, and failing to tidy the incident afterwards must not
+    turn a legitimate answer into an error the person sees.
+    """
+    repo = repository()
+    try:
+        incident = await run_in_threadpool(repo.get, incident_id)
+        if incident.get("status") != IncidentStatus.WAITING_FOR_APPROVAL.value:
+            return
+        waypoint = (
+            IncidentStatus.APPROVAL_DENIED
+            if category is FailureCategory.APPROVAL_REJECTED
+            else IncidentStatus.APPROVAL_EXPIRED
+        )
+        await run_in_threadpool(
+            repo.transition, incident_id, waypoint, trace_id=trace_id
+        )
+        await _fail(
+            repo,
+            incident_id,
+            WorkflowFailure(
+                category,
+                f"approval {approval_id} {category.value.lower()}",
+                approval_id=approval_id,
+                approver_principal=approver,
+            ),
+            trace_id,
+            {"specialists_attempted": ["systems"], "evidence_keys": []},
+        )
+    except Exception as exc:  # noqa: BLE001 - the human answer already landed
+        log_event(
+            "approval_closure_failed",
+            severity="ERROR",
+            trace_id=trace_id,
+            incident_id=incident_id,
+            approval_id=approval_id,
+            error_type=type(exc).__name__,
+        )
 
 
 @app.post("/approvals/{approval_id}/approve")
@@ -1836,6 +1923,17 @@ async def read_approval(approval_id: str) -> dict[str, Any]:
     }
 
 
+#: Incident states a resume may legitimately start from. WAITING_FOR_APPROVAL is
+#: the normal one; APPROVED means a previous resume recorded the human decision
+#: and then died before reaching the executor.
+RESUMABLE_STATES = frozenset(
+    {
+        IncidentStatus.WAITING_FOR_APPROVAL.value,
+        IncidentStatus.APPROVED.value,
+    }
+)
+
+
 #: Everything that must still be true before an approval may become a mutation.
 #: Checked at resume time against the authoritative plane, not at approval time
 #: — an approval is permission for the pinned decision, and the world moves.
@@ -1859,7 +1957,12 @@ def _approval_blockers(
         blockers.append("approval_expired")
     if approval.get("decision_id") != decision.get("decision_id"):
         blockers.append("decision_id_mismatch")
-    if incident.get("status") != IncidentStatus.WAITING_FOR_APPROVAL.value:
+    # APPROVED counts. The transition to APPROVED and the executor call cannot
+    # be one atomic act, so an instance reaped in between left a human-approved
+    # incident at APPROVED with no endpoint able to move it — the exact failure
+    # this gate exists to defend against, since its whole premise is that the
+    # process does not survive. Resume is idempotent instead.
+    if incident.get("status") not in RESUMABLE_STATES:
         blockers.append(f"incident_state:{incident.get('status')}")
     if decision.get("revoked"):
         blockers.append("decision_revoked")
@@ -1966,9 +2069,10 @@ async def resume_incident(
     # Every check passed. Record the human's authorization in the incident's own
     # lifecycle, then run the SAME execution pipeline an auto-allowed decision
     # uses — same executor, same identity, same OCC, same verifier.
-    await run_in_threadpool(
-        repo.transition, incident_id, IncidentStatus.APPROVED, trace_id=trace_id
-    )
+    if incident.get("status") == IncidentStatus.WAITING_FOR_APPROVAL.value:
+        await run_in_threadpool(
+            repo.transition, incident_id, IncidentStatus.APPROVED, trace_id=trace_id
+        )
     log_event(
         "incident_resumed",
         trace_id=trace_id,

@@ -91,7 +91,11 @@ from scf.tools.cloud_run_evidence import (
 app = FastAPI(title="SCF Remediation Executor", version="0.6.0")
 
 EXECUTOR_IDENTITY = "sa-executor"
-EXECUTABLE = {Decision.AUTO_ALLOWED.value, "APPROVED"}
+#: Decisions executable without a human. `"APPROVED"` used to sit here as a bare
+#: string the `Decision` enum cannot produce — inert until Gate F, and then a
+#: value that would have skipped `_approval_blocks_execution` entirely. Every
+#: member of an authorization set has to come from a closed enum.
+EXECUTABLE = {Decision.AUTO_ALLOWED.value}
 WORKER_ID = f"{os.environ.get('K_REVISION', 'local')}:{uuid.uuid4().hex[:8]}"
 
 #: States from which a fresh precondition check may proceed. MUTATED is
@@ -299,7 +303,12 @@ def _identity(decision: dict[str, Any], incident_id: str, decision_id: str) -> t
     return execution_id, fingerprint
 
 
-def _observe(service: str, authorized_revision: str = "") -> dict[str, Any]:
+def _observe(
+    service: str,
+    authorized_revision: str = "",
+    *,
+    accept_untagged_candidate: bool = False,
+) -> dict[str, Any]:
     """Read real infrastructure. Used for precondition and reconciliation.
 
     Also re-probes the target through its own tag URL, so freshness is
@@ -325,10 +334,18 @@ def _observe(service: str, authorized_revision: str = "") -> dict[str, Any]:
             candidate_revision = revision
             candidate_uri = entry.get("uri") or ""
             break
-        # No blessed tag: accept the exact authorized revision if it is still
-        # addressable. Never a substitute — only the revision already pinned in
-        # the decision a human approved.
-        if authorized_revision and revision == authorized_revision and entry.get("uri"):
+        # Only for an action whose authorization is a HUMAN decision about one
+        # exact revision. For a rollback the `known-good` tag is itself the
+        # authorization, so an operator who withdraws it has withdrawn the
+        # premise and the mutation must refuse — accepting any other tag here
+        # silently removed the only mid-flight way to revoke a standing
+        # auto-allowed rollback, on the path with no human in the loop.
+        if (
+            accept_untagged_candidate
+            and authorized_revision
+            and revision == authorized_revision
+            and entry.get("uri")
+        ):
             candidate_revision = revision
             candidate_uri = entry.get("uri") or ""
 
@@ -541,7 +558,14 @@ async def execute(
 
     # Reconcile against real infrastructure before touching anything. This is
     # what closes the crash window: we never assume what a dead process did.
-    observed = await run_in_threadpool(_observe, target_ref, authorized_revision)
+    human_approved = (
+        decision.get("action_type")
+        == ActionType.SHIFT_TRAFFIC_TO_APPROVED_CANDIDATE.value
+    )
+    observed = await run_in_threadpool(
+        _observe, target_ref, authorized_revision,
+        accept_untagged_candidate=human_approved,
+    )
     base["observed_active_revision"] = observed["active_revision"]
     base["observed_traffic_allocation"] = observed["traffic_allocation"]
 

@@ -449,7 +449,7 @@ guessing.
 
 ## E14 — failure taxonomy
 
-Sixteen categories, one table, no free-form failure semantics anywhere. Each
+Eighteen categories, one table, no free-form failure semantics anywhere. Each
 row fixes the resting state, reconcilability, retry eligibility, audit event
 and manager summary together, so a new category cannot be added without
 deciding what a human should do about it.
@@ -469,6 +469,8 @@ deciding what a human should do about it.
 | `EXECUTOR_UNAVAILABLE` | `EXECUTION_FAILED` | **yes** | **yes** |
 | `EXECUTION_OUTCOME_UNKNOWN` | `EXECUTION_FAILED` | **yes** | no |
 | `APPROVAL_REQUIRED_NO_APPROVER` | `ESCALATED` | no | no |
+| `APPROVAL_REJECTED` | `ESCALATED` | no | no |
+| `APPROVAL_EXPIRED` | `ESCALATED` | no | no |
 | `VERIFIER_UNAVAILABLE` | `REMEDIATION_FAILED` | **yes** | no |
 | `VERIFICATION_FAILED` | `ESCALATED` | no | no |
 | `REMEDIATION_FAILED` | `ESCALATED` | no | no |

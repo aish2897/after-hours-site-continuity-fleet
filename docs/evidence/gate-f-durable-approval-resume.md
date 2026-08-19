@@ -313,9 +313,31 @@ addressable and still healthy. It never accepts a substitute.
 
 ---
 
+## Internal hostile review
+
+One focused review of the whole gate, by a reviewer with no editing role. It
+confirmed the core properties hold — it could not produce a mutation without a
+human approval, a duplicate infrastructure effect, or a false RESOLVED — and it
+found five defects, all fixed before this artifact was finalised.
+
+| Sev | Finding | Fix |
+|---|---|---|
+| High | An incident stranded permanently at `APPROVED` if the instance died between recording the human decision and calling the executor. No endpoint could move it. | resume accepts `APPROVED` and is idempotent |
+| High | A human **rejection** left the incident waiting forever with no handover — "ESCALATE INSTEAD" escalated nothing. Same for a lapsed request. | refusal and expiry walk to `ESCALATED` through `APPROVAL_DENIED` / `APPROVAL_EXPIRED`, with a manager handover |
+| Medium | The new freshness check let a rollback proceed after an operator **withdrew** the `known-good` tag — removing the only mid-flight way to revoke a standing auto-allowed authorization | the untagged fallback applies only to the human-approved action |
+| Medium | `X-Goog-Authenticated-User-Email` was trusted without IAP in front, so any invoker could write an arbitrary named person into the audit chain as the approver | headers are read only where a deployment declares IAP; otherwise a named placeholder |
+| Low | `"APPROVED"` sat in the executor's executable set as a bare string the `Decision` enum cannot produce — inert until this gate, then a value that skipped the approval check | removed; every member now comes from the closed enum |
+
+The two High findings are the same shape and worth naming: both were incidents
+that a person had engaged with, left in a state nothing could move. The gate is
+about surviving process death, and its own failure mode was to strand precisely
+the incidents a human had touched.
+
+---
+
 ## Tests
 
-**Offline: 504 passed, 11 skipped** — including 21 Gate F contract tests
+**Offline: 507 passed, 11 skipped** — including 24 Gate F contract tests
 covering the approval-required policy path, the durable waiting state, approval
 binding and every integrity check, the caller-supplied-field refusals, approver
 identity handling, executor-side verification, and that resume reads durable
@@ -336,6 +358,11 @@ state rather than re-running the workflow.
 2. **The approval endpoint is authenticated, not authorized by role.** Any
    principal Google lets invoke the orchestrator may approve. `required_approval_role`
    is recorded on the approval and is not yet enforced against the caller.
+   Because of that, and because no IAP is deployed, the approver is recorded as
+   a named placeholder rather than from a request header: a header this fleet
+   cannot verify must not be able to name a person in a hash-chained audit
+   record. `SCF_TRUST_IAP_HEADERS=true` enables reading it on a deployment that
+   genuinely has IAP in front.
 3. **Expiry is enforced on read, not swept.** An approval past its TTL is
    refused when someone looks at it; nothing proactively marks it `EXPIRED`.
 4. **Resume is operator-triggered**, like reconciliation. Nothing sweeps

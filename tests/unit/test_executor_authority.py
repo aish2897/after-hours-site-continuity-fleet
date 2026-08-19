@@ -73,8 +73,16 @@ def test_adversarial_stored_decisions_are_refused(overrides, expected):
     assert _validate(good_decision(**overrides), request()) == expected
 
 
-def test_only_auto_allowed_and_approved_are_executable():
-    assert EXECUTABLE == {Decision.AUTO_ALLOWED.value, "APPROVED"}
+def test_only_auto_allowed_is_executable_without_a_human():
+    """Every member of the set comes from the closed enum.
+
+    `"APPROVED"` used to sit here as a bare string `Decision` cannot produce.
+    It was inert until Gate F made APPROVAL_REQUIRED executable-with-approval,
+    at which point it became a value that would have skipped the approval check
+    altogether.
+    """
+    assert EXECUTABLE == {Decision.AUTO_ALLOWED.value}
+    assert all(value in {d.value for d in Decision} for value in EXECUTABLE)
     assert Decision.DENIED.value not in EXECUTABLE
     assert Decision.APPROVAL_REQUIRED.value not in EXECUTABLE
 

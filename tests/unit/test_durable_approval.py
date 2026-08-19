@@ -268,17 +268,24 @@ def test_the_approval_request_contract_forbids_everything_that_matters():
     assert main.ApprovalDecisionRequest.model_validate({"note": "ok"}).note == "ok"
 
 
-def test_the_approver_identity_is_never_taken_from_a_caller_header():
+def test_a_spoofable_header_cannot_name_the_approver():
+    """Without IAP in front, X-Goog-* is just a header anyone may set."""
+    assert main.TRUST_PLATFORM_APPROVER_HEADERS is False, (
+        "this deployment has no IAP, so the headers must not be trusted"
+    )
+    for email in (
+        "accounts.google.com:attacker@evil.example",
+        "ceo@retailco.example",
+        None,
+    ):
+        assert main._approver_principal(None, email) == main.DEMO_APPROVER_PRINCIPAL
+    # A bare assertion string proves nothing either.
+    assert main._approver_principal("any-string", None) == main.DEMO_APPROVER_PRINCIPAL
+
     source = inspect.getsource(main._approver_principal)
     assert "X-User" not in source
     assert "approver_email" not in source
-    # Absent a platform assertion, a NAMED demo principal is recorded rather
-    # than anything a caller supplied.
-    assert main._approver_principal(None, None) == main.DEMO_APPROVER_PRINCIPAL
-    # A Google-asserted end-user email is used when the platform supplies one.
-    assert main._approver_principal(None, "accounts.google.com:me@example.com") == (
-        "me@example.com"
-    )
+    assert "TRUST_PLATFORM_APPROVER_HEADERS" in source
 
 
 def test_approval_ids_are_server_minted():
@@ -325,3 +332,68 @@ def test_the_resumed_path_records_the_action_it_took():
     assert "action_executed" in source
     assert "repo.record_action" in source
     assert "resumed_after_approval" in source
+
+
+# --- Gate F internal hostile review ------------------------------------------
+
+
+def test_a_resume_interrupted_after_approval_can_be_retried():
+    """The APPROVED write and the executor call are not one atomic act."""
+    assert IncidentStatus.APPROVED.value in main.RESUMABLE_STATES
+    assert IncidentStatus.WAITING_FOR_APPROVAL.value in main.RESUMABLE_STATES
+
+    for status in (IncidentStatus.WAITING_FOR_APPROVAL, IncidentStatus.APPROVED):
+        blockers = main._approval_blockers(
+            {
+                "state": "APPROVED",
+                "expires_at": "2999-01-01T00:00:00+00:00",
+                "decision_id": "DEC-1",
+            },
+            {"decision_id": "DEC-1", "decision": "APPROVAL_REQUIRED"},
+            {"status": status.value},
+            now_iso="2026-01-01T00:00:00+00:00",
+        )
+        assert not [b for b in blockers if b.startswith("incident_state")], status
+
+    # And the transition is skipped when it has already happened.
+    source = inspect.getsource(main.resume_incident)
+    assert 'if incident.get("status") == IncidentStatus.WAITING_FOR_APPROVAL.value:' in source
+
+
+def test_a_refusal_and_a_lapse_both_reach_a_terminal_state():
+    """"ESCALATE INSTEAD" must actually escalate."""
+    from scf.domain.failures import FailureCategory, handling
+    from scf.domain.state_machine import can_transition
+
+    for category in (FailureCategory.APPROVAL_REJECTED, FailureCategory.APPROVAL_EXPIRED):
+        rule = handling(category)
+        assert rule.resting_status is IncidentStatus.ESCALATED, category
+        assert rule.reconcilable is False, category
+        assert "nothing was changed" in rule.manager_summary.lower(), category
+
+    assert can_transition(
+        IncidentStatus.WAITING_FOR_APPROVAL, IncidentStatus.APPROVAL_DENIED
+    )
+    assert can_transition(
+        IncidentStatus.WAITING_FOR_APPROVAL, IncidentStatus.APPROVAL_EXPIRED
+    )
+    assert can_transition(IncidentStatus.APPROVAL_DENIED, IncidentStatus.ESCALATED)
+    assert can_transition(IncidentStatus.APPROVAL_EXPIRED, IncidentStatus.ESCALATED)
+
+    source = inspect.getsource(main._record_approval_decision)
+    assert "_close_unapproved_incident" in source
+
+
+def test_withdrawing_the_known_good_tag_still_blocks_a_rollback():
+    """For a rollback, the tag IS the authorization."""
+    source = inspect.getsource(executor.execute)
+    assert "accept_untagged_candidate=human_approved" in source
+    assert (
+        "ActionType.SHIFT_TRAFFIC_TO_APPROVED_CANDIDATE.value" in source
+    ), "the fallback is for the human-approved action only"
+
+    observe = inspect.getsource(executor._observe)
+    assert "accept_untagged_candidate" in observe
+    # The fallback branch is gated, not merely ordered after the blessed tag.
+    fallback = observe[observe.index("accept_untagged_candidate"):]
+    assert "and authorized_revision" in fallback
