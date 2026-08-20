@@ -76,6 +76,7 @@ Changing any of these is a STOP condition, not a refactor.
 | Project | `site-continuity-fleet` |
 | Core infrastructure | Sydney `australia-southeast1` |
 | Model Armor threat screening | Singapore `asia-southeast1` |
+| Model Armor filter version | dynamic alias `FILTER_VERSION_ALIAS_STABLE`, never pinned |
 | Gemini 3.7 Flash inference | Vertex AI `global` |
 | Cloud Run mutation | v1 `namespaces.services.replaceService` with `metadata.resourceVersion` |
 | Authoritative plane | Firestore `(default)` |
@@ -376,6 +377,14 @@ Speculative Low findings are documented, not chased.
 
 ---
 
+## 14b. Dated checks before freeze
+
+| Due | Check |
+|---|---|
+| **2026-08-31** | Google promotes Model Armor filter v3 to STABLE and demotes v1 to LEGACY. The template selects `FILTER_VERSION_ALIAS_STABLE`, so it should follow automatically. **Verify it did**: run `infra/provision-model-armor.sh` and confirm the printed resolved version is `v3`, then re-run one injection and one benign report. If it has not moved, set `SCF_MODEL_ARMOR_ALIAS=FILTER_VERSION_ALIAS_LATEST` and re-run. v1 retires 2026-11-29 and a new template cannot be created against a Legacy version, so a fresh deployment after that date depends on this. |
+
+---
+
 ## 15. Competition clock
 
 | Milestone | Date |
@@ -395,7 +404,7 @@ Aug 31 is submission, link and access buffer **only**. No feature development.
 | Field | Value |
 |---|---|
 | Latest commit | see the tail of `git log --oneline` |
-| Offline tests | 537 collected (526 passed, 11 skipped) |
+| Offline tests | 542 collected (531 passed, 11 skipped) |
 | Current gate | Gate G closed |
 | Gate E status | **VERIFIED**; external Codex catch-up audit pending on quota |
 | Gate F status | **VERIFIED**; same Codex catch-up audit pending |

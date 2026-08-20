@@ -55,17 +55,20 @@ filterConfig:
   raiSettings                    DANGEROUS  MEDIUM_AND_ABOVE
                                  HARASSMENT MEDIUM_AND_ABOVE
 templateMetadata:
+  filterVersionSelector.alias    FILTER_VERSION_ALIAS_STABLE
   dataResidencyCompliant         true
 
-filter version (from live responses)   v1, FILTER_VERSION_ALIAS_STABLE
+filter version (resolved at call time) v1 today, via the STABLE alias
 ```
 
 Two findings recorded rather than worked around:
 
-- **The API warns** that filter version V1 is STABLE and moves to LEGACY on
-  2026-09-01. Setting a newer alias via `templateMetadata.filterVersionConfig`
-  is rejected — `Unknown name "filterVersionConfig"` — so v1 is what this API
-  version offers and v1 is what is claimed.
+- **The filter version is selected by dynamic alias, not pinned** — corrected
+  after Gate G closed, see the reproducibility note below. An earlier attempt
+  used `templateMetadata.filterVersionConfig`, which is *response* metadata and
+  not a request field; the template selector is
+  `templateMetadata.filterVersionSelector.alias`, and it takes the fully
+  qualified enum (`FILTER_VERSION_ALIAS_STABLE`, not `STABLE`).
 - **`gcloud model-armor templates create` fails with `PERMISSION_DENIED` even
   for a project Owner.** The CLI targets the global host; the regional endpoint
   `modelarmor.asia-southeast1.rep.googleapis.com` works. Worth knowing before
@@ -320,12 +323,68 @@ benign 503->200 INC-20260820-6856D1  AUTO_ALLOWED -> RESOLVED, mutated, RECOVERE
 
 ---
 
+## G.1 — reproducible after v1 goes Legacy
+
+Google moves filter v1 to LEGACY on **2026-08-31** and retires it on
+**2026-11-29**, and a new template **cannot be created against a Legacy
+version**. A judge rebuilding this project in September would have hit that
+wall, so the template is selected by dynamic alias and the provisioning is now a
+script rather than a remembered REST call.
+
+**The documented selector is accepted.** The field is
+`templateMetadata.filterVersionSelector.alias` — the earlier rejected
+`filterVersionConfig` is *response* metadata, not a request field. The value
+must be the fully qualified enum; a bare `"STABLE"` is refused:
+
+```
+"STABLE"                       -> 400 Invalid value at
+                                  'template.template_metadata.filter_version_selector.alias'
+"FILTER_VERSION_ALIAS_STABLE"  -> accepted
+"FILTER_VERSION_ALIAS_LATEST"  -> accepted
+```
+
+What each alias actually resolves to, measured by real sanitization calls:
+
+| Alias | Resolves today | Google's notice |
+|---|---|---|
+| `FILTER_VERSION_ALIAS_STABLE` | **v1** | "V1 is in STABLE status and will be moved to LEGACY on 09-01-2026" |
+| `FILTER_VERSION_ALIAS_LATEST` | **v3** | "V3 is in LATEST status and will be moved to STABLE on 09-01-2026" |
+
+So `STABLE` is not a synonym for v1 — it is a moving reference that becomes v3
+on the same date v1 is demoted. The live template now carries it explicitly:
+
+```
+templateMetadata:
+  filterVersionSelector: { alias: FILTER_VERSION_ALIAS_STABLE }
+```
+
+**Fresh deployment after 31 August:** run `infra/provision-model-armor.sh`. It
+is idempotent, creates or updates, asks only for filters this region supports,
+and ends by printing the version a real sanitization call resolved to. Running
+it on 30 August yields v1; the same script on 1 September yields v3, with no
+edit. `SCF_MODEL_ARMOR_ALIAS=FILTER_VERSION_ALIAS_LATEST` adopts v3 immediately.
+
+Re-verified after the change, through the deployed adapter:
+
+```
+benign                 NO_MATCH_FOUND   allowed
+injection              MATCH_FOUND      pi_and_jailbreak HIGH      blocked
+SDP synthetic card     MATCH_FOUND      CREDIT_CARD_NUMBER         blocked
+screening unavailable  ScreeningUnavailable raised — fails closed
+```
+
+Security semantics are unchanged and no IAM was widened: this touched the filter
+version selector and added a script.
+
+---
+
 ## Honest limitations after Gate G
 
 1. **Detection is incomplete, and measured rather than estimated.** Case E was
    missed. No detection rate is claimed.
-2. **Filter version v1 (STABLE).** Google warns it becomes LEGACY on
-   2026-09-01; the newer alias is not settable through this API version.
+2. **Filter version resolves to v1 today**, through the `STABLE` alias rather
+   than a pin, so it becomes v3 on its own when Google promotes it. See the
+   reproducibility note.
 3. **Response screening is implemented but not on the live path.** The adapter
    supports `sanitizeModelResponse` and it is not yet wired into the workflow —
    so it is **not claimed** as verified. Today's routing output is a typed
