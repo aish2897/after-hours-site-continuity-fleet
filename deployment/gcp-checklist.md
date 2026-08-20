@@ -13,7 +13,7 @@ record of what is and is not integrated is the integration-status table in
 | Cloud Run | `australia-southeast1` Sydney | **done** |
 | Firestore | `australia-southeast1` Sydney | **done** (two databases) |
 | Artifact Registry | `australia-southeast1` Sydney | **done** |
-| Model Armor | `australia-southeast2` Melbourne | PLANNED, not integrated |
+| Model Armor | `asia-southeast1` Singapore | **done** (Melbourne offers SDP only, without the prompt-injection detector) |
 | Gemini 3.7 Flash inference | `global` | **done** |
 
 Gemini 3.7 Flash is not available through an Australian regional inference

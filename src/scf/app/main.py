@@ -172,16 +172,32 @@ async def create_incident(
         screening = await run_in_threadpool(
             screen_untrusted_text, intake.description
         )
-    except ScreeningUnavailable as unavailable:
+        await run_in_threadpool(
+            repo.record_screening,
+            incident_id,
+            screening.as_log_fields(),
+            trace_id=trace_id,
+        )
+    except Exception as unavailable:  # noqa: BLE001 - nothing may strand an incident
         # Fail CLOSED. Unscreened untrusted text does not reach the model just
         # because the screener was down — an availability problem must not
         # quietly become a security one. Bounded: one attempt, no retry loop.
+        # Every exception, not only ScreeningUnavailable. Screening was the
+        # first call placed AFTER the incident is persisted, and it arrived with
+        # a narrower guard than the call it was inserted in front of — a
+        # credential refresh failing, a RecursionError from a hostile body, or
+        # the metadata write erroring would escape as a 500 and leave the
+        # incident at INTAKE, which no endpoint can move and no handover
+        # describes. The direction was never fail-open; the guarantee that a
+        # failure always produces a handover was what got lost.
         log_event(
             "model_armor_unavailable",
             severity="ERROR",
             trace_id=trace_id,
             incident_id=incident_id,
-            failure_reason=unavailable.reason,
+            failure_reason=getattr(
+                unavailable, "reason", type(unavailable).__name__
+            ),
         )
         failed = await _fail(
             repo,
@@ -204,9 +220,6 @@ async def create_incident(
             trace_id=trace_id,
         )
 
-    await run_in_threadpool(
-        repo.record_screening, incident_id, screening.as_log_fields(), trace_id=trace_id
-    )
     if not screening.allowed:
         log_event(
             "model_armor_blocked",

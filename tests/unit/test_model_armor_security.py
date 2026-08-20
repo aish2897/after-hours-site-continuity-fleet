@@ -77,6 +77,14 @@ def test_sensitive_data_is_detected_and_the_value_is_not_kept():
             "sanitizationResult": {
                 "filterMatchState": "MATCH_FOUND",
                 "filterResults": {
+                    # A real response carries every configured filter; the
+                    # required detector must be among them.
+                    "pi_and_jailbreak": {
+                        "piAndJailbreakFilterResult": {
+                            "executionState": "EXECUTION_SUCCESS",
+                            "matchState": "NO_MATCH_FOUND",
+                        }
+                    },
                     "sdp": {
                         "sdpFilterResult": {
                             "inspectResult": {
@@ -113,6 +121,15 @@ def test_sensitive_data_is_detected_and_the_value_is_not_kept():
         {"sanitizationResult": {"filterMatchState": "MATCH_FOUND"}},
         {"sanitizationResult": {"filterMatchState": "NO_MATCH_FOUND",
                                 "filterResults": "not-a-dict"}},
+        # Screened nothing. Not the same as found nothing.
+        {"sanitizationResult": {"filterMatchState": "NO_MATCH_FOUND",
+                                "filterResults": {}}},
+        # The detector this gate exists for did not report.
+        {"sanitizationResult": {"filterMatchState": "NO_MATCH_FOUND",
+                                "filterResults": {"sdp": {"sdpFilterResult": {
+                                    "inspectResult": {
+                                        "executionState": "EXECUTION_SUCCESS",
+                                        "matchState": "NO_MATCH_FOUND"}}}}}},
     ],
 )
 def test_a_malformed_response_never_reads_as_allowed(payload):
@@ -282,3 +299,33 @@ def test_the_fault_modes_are_env_only_and_closed():
     # the screening path consults request data to decide whether to fault.
     assert "request" not in source, "a fault must not be reachable from a request"
     assert "os.environ" not in source
+
+
+def test_a_template_that_screens_nothing_does_not_read_as_clean():
+    """A mis-scoped template must not look like a clean bill of health."""
+    from scf.security.model_armor import REQUIRED_FILTER
+
+    assert REQUIRED_FILTER == "pi_and_jailbreak"
+    with pytest.raises(ScreeningUnavailable) as empty:
+        _verdict({"sanitizationResult": {"filterMatchState": "NO_MATCH_FOUND",
+                                         "filterResults": {}}})
+    assert "no_filters_executed" in empty.value.reason
+
+
+def test_nothing_after_persistence_can_strand_an_incident():
+    """Screening was inserted in front of a call that already had this guard."""
+    source = _code_only(main.create_incident)
+    guard = source[source.index("screen_untrusted_text"):]
+    assert "except Exception" in guard[: guard.index("model_armor_blocked")], (
+        "a credential refresh, a RecursionError or a failed metadata write must "
+        "produce a handover, not a 500 and an incident stuck at INTAKE"
+    )
+    # The metadata write is inside the guarded block, not after it.
+    assert guard.index("record_screening") < guard.index("except Exception")
+
+
+def test_the_response_screener_does_not_claim_to_be_wired():
+    doc = model_armor.screen_model_response.__doc__ or ""
+    assert "NOT WIRED" in doc
+    # And it genuinely is not called anywhere.
+    assert "screen_model_response(" not in inspect.getsource(main)

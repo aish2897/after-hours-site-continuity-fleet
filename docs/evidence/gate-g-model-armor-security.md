@@ -279,13 +279,44 @@ Gate F approval path    INC-20260820-CCEA58
 
 ## Tests
 
-**Offline: 526 passed, 11 skipped** — including 19 Gate G tests covering the
+**Offline: 531 passed, 11 skipped** — including 24 Gate G tests covering the
 verdict reader in both directions, five malformed-response shapes, a skipped
 detector, the bounded/no-retry contract, screening-before-the-model ordering, a
 blocked report never reaching the model, that a verdict never becomes `Evidence`
 or reaches the gate, that untrusted evidence cannot satisfy the policy, that
 dangerous actions are refused regardless of screening, the region decision, and
 a guard that no document claims injection is impossible.
+
+---
+
+## Internal hostile review
+
+One focused security review of the whole gate. **Verdict: PASS** — no Critical,
+no High. It could not bypass screening, fail it open into Gemini, self-approve,
+spoof an approver, widen IAM, or leak raw text or matched values.
+
+It found one Medium and three Low, all fixed after the verdict and therefore
+**not themselves re-reviewed**:
+
+| Sev | Finding | Fix |
+|---|---|---|
+| Medium | Screening was the first call placed *after* the incident is persisted, and arrived with a narrower guard than the call it displaced. A credential-refresh failure, a `RecursionError` from a hostile body, or a failed metadata write escaped as a 500 and stranded the incident at `INTAKE` — no handover, no category, no route back. Never fail-open; the guarantee that a failure always produces a handover was what was lost. | every exception on the screening path now produces a handover |
+| Low | `config.py` still said no Model Armor step existed | corrected, including what is still not true |
+| Low | `deployment/gcp-checklist.md` still said Melbourne, PLANNED | corrected |
+| Low | `infra/iam-matrix.md` — which calls itself provisioned reality — omitted `scfPromptScreener` | added, with its permission set |
+
+Two hardening changes taken from its "could not break" notes, where it flagged
+shapes that were not attacker-reachable but would read as clean: a response
+carrying **no** filter results, and one where the prompt-injection filter is
+simply absent, now both fail closed. A template that screens nothing must not
+look like a clean bill of health.
+
+Re-verified live on the hardened build (`scf-orchestrator-00157-vvm`):
+
+```
+injection      INC-20260820-4733B8  UNTRUSTED_CONTENT_BLOCKED  pi_and_jailbreak
+benign 503->200 INC-20260820-6856D1  AUTO_ALLOWED -> RESOLVED, mutated, RECOVERED
+```
 
 ---
 

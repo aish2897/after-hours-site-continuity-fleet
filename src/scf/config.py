@@ -39,10 +39,12 @@ ARTIFACT_REGISTRY_REGION: Final[str] = CORE_REGION
 # `global` is therefore the deliberate, approved primary inference location,
 # not a fallback.
 #
-# Note what is NOT true today: there is no classification or Model Armor step
-# between the duty manager's report text and this endpoint. The raw description
-# is passed to the routing agent. The trust-level separation protects the
-# authorization path, not the model input. See SECURITY.md.
+# What IS true today: the duty manager's report is screened by Model Armor in
+# Singapore before it reaches this endpoint, and a blocked report never reaches
+# it at all. What is still NOT true: screening is not complete — a live
+# policy-bypass attempt passed it — so the trust-level separation remains what
+# protects the authorization path. Screening protects the model input, and the
+# two are different jobs. See SECURITY.md and the Gate G evidence.
 
 MODEL_LOCATION: Final[str] = "global"
 REQUESTED_MODEL_ID: Final[str] = "gemini-3.7-flash"

@@ -65,6 +65,11 @@ API_HOST = "https://modelarmor.{location}.rep.googleapis.com/v1"
 TIMEOUT_SECONDS = 10.0
 SCREENING_RETRY_BUDGET = 0
 
+#: The filter whose absence means this screening did not do its job. The whole
+#: point of the region choice was to get this detector; a response without it
+#: has not screened for the thing being screened for.
+REQUIRED_FILTER = "pi_and_jailbreak"
+
 
 class ScreeningUnavailable(Exception):
     """Screening could not be completed. Never means "the text was fine"."""
@@ -142,6 +147,14 @@ def _read_verdict(payload: dict[str, Any], content_hash: str, latency_ms: int) -
     filters = result.get("filterResults")
     if not isinstance(filters, dict):
         raise ScreeningUnavailable("malformed_response:no_filter_results")
+    if not filters:
+        # No filter ran at all. A response that screened nothing is not a
+        # response that found nothing, and a silently mis-scoped template must
+        # not read as clean.
+        raise ScreeningUnavailable("no_filters_executed")
+    if REQUIRED_FILTER not in filters:
+        # The detector this gate exists for did not report. Same reasoning.
+        raise ScreeningUnavailable(f"required_filter_absent:{REQUIRED_FILTER}")
 
     for name, wrapper in filters.items():
         if not isinstance(wrapper, dict):
@@ -240,8 +253,11 @@ def screen_untrusted_text(text: str) -> ModelArmorResult:
 def screen_model_response(text: str) -> ModelArmorResult:
     """Screen what the model produced, before the workflow acts on it.
 
-    Defence in depth: the typed schema and the deterministic gate are what stop
-    a hostile proposal becoming an action, and this runs in front of them.
+    NOT WIRED INTO THE LIVE PATH. Implemented and tested, and deliberately not
+    claimed as verified: today the routing output is a typed schema and the
+    remediation proposal is produced deterministically, so the schema and the
+    deterministic gate are what constrain the model's output. Wiring this in
+    front of them is a real improvement and it has not been done yet.
     """
     return _sanitize(
         "sanitizeModelResponse", {"modelResponseData": {"text": text}}, text

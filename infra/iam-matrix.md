@@ -11,6 +11,7 @@ service-account key file was ever created or downloaded.
 | Identity | Binding | Bound at |
 |---|---|---|
 | `sa-orchestrator` | `datastore.user`, `aiplatform.user`, `logging.logWriter` | project |
+| `sa-orchestrator` | `scfPromptScreener` (custom, use-only) | project |
 | `sa-orchestrator` | `roles/run.invoker` | `scf-agent-systems`, `scf-executor`, `scf-verifier` |
 | `sa-agent-systems` | `roles/run.viewer` | `dispatch-web` service |
 | `sa-agent-systems` | `logging.logWriter` | project |
@@ -37,6 +38,15 @@ Not yet created: `sa-agent-network`, `sa-agent-security`, `sa-agent-continuity`,
 scfRemediator        run.services.get
                      run.services.update
   bound on: dispatch-web service resource only
+
+scfPromptScreener    modelarmor.templates.useToSanitizeUserPrompt
+                     modelarmor.templates.useToSanitizeModelResponse
+  bound on: project, sa-orchestrator only. Use-only: cannot get, list, create,
+  update or delete a template, so this identity cannot read or weaken the
+  filter configuration it is screened against. sa-executor holds no Model
+  Armor permission of any kind.
+  Narrower than the predefined roles/modelarmor.user, which additionally
+  grants four sanitize verbs this fleet never calls.
 
 scfArtifactReader    artifactregistry.repositories.downloadArtifacts
   bound on: cloud-run-source-deploy repository resource only
