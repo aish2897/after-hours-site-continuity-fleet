@@ -100,10 +100,11 @@ Stated plainly rather than implied away.
    through an Australian regional inference endpoint — Sydney returns
    `404 NOT_FOUND` for the publisher model, confirmed by a real call
    (`docs/evidence/gate-a-vertex-gemini.md`). Inference therefore uses Vertex
-   AI's `global` endpoint. Model Armor is **PLANNED and not integrated**: the
-   intended design would inspect untrusted content in Melbourne
-   `australia-southeast2`, a leg that would stay within Australia, but no
-   inspection happens today. See the data handling section below.
+   AI's `global` endpoint. Model Armor screening runs in Singapore
+   `asia-southeast1`, so untrusted content leaves Australia too. Melbourne was
+   the plan and cannot serve it: template-based Model Armor there offers
+   Sensitive Data Protection without the prompt-injection detector. See the data
+   handling section below.
 4. **Audit is tamper-evident, not immutable.** The chain detects edits, but a
    compromised authoritative writer could rewrite a record and the incident's
    `audit_tail_hash` together. Detecting that needs an external witness we do
@@ -184,14 +185,16 @@ residency is therefore not claimed.**
 | Concern | Location |
 |---|---|
 | Cloud Run, Firestore, Artifact Registry | Sydney `australia-southeast1` |
-| Model Armor inspection *(PLANNED, not integrated)* | Melbourne `australia-southeast2` |
+| Model Armor threat screening | Singapore `asia-southeast1` |
 | Gemini 3.7 Flash inference | `global` |
 
 Because inference leaves the country, the classification and security boundary
 is load-bearing rather than decorative. The boundary that exists today is the
-trust-level separation described above. **Model Armor inspection is PLANNED and
-not integrated**, so no prompt-injection resistance is claimed — only that
-untrusted content cannot reach an authorization path.
+trust-level separation described above, and Model Armor now screens untrusted
+text before the model sees it. **Complete prompt-injection resistance is still
+not claimed**: screening is one layer and it demonstrably misses things — a live
+policy-bypass attempt passed it (Gate G, case E) and changed nothing, because
+untrusted content cannot reach an authorization path regardless.
 
 Synthetic company, sites, users, services, and logs only. No employer data,
 code, names, policies, addresses, configurations, or IP. Personal Google Cloud

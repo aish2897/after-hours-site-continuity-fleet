@@ -91,13 +91,14 @@ boundary instead of a naming convention.
 | Concern | Location | Why |
 |---|---|---|
 | Cloud Run, Firestore, Artifact Registry | Sydney `australia-southeast1` | Authoritative state and privileged execution stay in Australia |
-| Model Armor inspection *(PLANNED)* | Melbourne `australia-southeast2` | No Sydney region; nearest Australian region |
+| Model Armor threat screening | Singapore `asia-southeast1` | Melbourne offers SDP only, without the prompt-injection detector |
 | Gemini 3.7 Flash inference | `global` | No Australian inference endpoint published |
 
-Model Armor is **PLANNED and not integrated**. It is not offered in Sydney, so
-the intended design would make a deliberate Sydney → Melbourne hop for security
-inspection — a leg entirely within Australia. No such inspection happens today,
-and nothing in the running system depends on it.
+Model Armor screens untrusted reports before Gemini sees them. Melbourne was
+the plan and cannot do it — template Model Armor there offers Sensitive Data
+Protection without the prompt-injection detector — so screening runs in
+Singapore and leaves Australia. Nothing in the authorization path depends on
+it: if screening misses, the deterministic gate still refuses.
 
 Model inference is not. Gemini 3.7 Flash publishes inference endpoints for
 `global`, `us`, and `eu` only; a real call to the Sydney regional endpoint

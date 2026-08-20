@@ -1,12 +1,13 @@
 # STATUS
 
-CURRENT PHASE: Gate F closed — AUG 22 DURABILITY DAY: VERIFIED
+CURRENT PHASE: Gate G closed — AUG 23 SECURITY / MODEL ARMOR: VERIFIED
 
 WED AUG 19 — FULL AUTONOMOUS SLICE: VERIFIED
 (achieved 2026-08-15, ahead of the wall-plan date)
 
 AUG 21 — FAILURE ENGINEERING: VERIFIED
 AUG 22 — DURABILITY DAY: VERIFIED
+AUG 23 — SECURITY / MODEL ARMOR: VERIFIED
 (achieved 2026-08-17, ahead of the wall-plan date)
 
 ## VERIFIED
@@ -111,7 +112,7 @@ Nothing. Gate E is closed.
 - Automatic sweep of reconcilable incidents (`/reconcile` is operator-triggered)
 - Human approval and resume
 - Crash-resumable workflow
-- Model Armor (Melbourne `australia-southeast2`)
+- Model Armor response screening on the live path (the adapter supports it)
 - Cloud Trace end-to-end spans
 - Network Investigator runtime
 - Security & Identity Investigator runtime
@@ -149,7 +150,9 @@ Nothing. Gate E is closed.
   Firestore and the Cloud Run Admin API cannot be committed together, so that
   window is narrowed rather than eliminated — the same limitation as the
   ownership fence.
-- No prompt-injection resistance is claimed. Model Armor is not integrated.
+- Complete prompt-injection resistance is not claimed. Model Armor screens
+  untrusted input in Singapore and demonstrably misses things; authorization
+  never depended on it.
 - No Cloud Trace spans exist.
 
 ## NEXT HARD GATE
@@ -178,7 +181,7 @@ remaining fleet investigators.
 project        site-continuity-fleet
 core region    australia-southeast1 (Sydney)
 model          gemini-3.7-flash, Vertex AI, location=global
-model armor    australia-southeast2 (Melbourne), not integrated yet
+model armor    asia-southeast1 (Singapore), integrated and live
 firestore      (default)        australia-southeast1  authoritative control plane
                execution-state  australia-southeast1  idempotency + receipts
 

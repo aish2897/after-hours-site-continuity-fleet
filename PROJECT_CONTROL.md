@@ -75,7 +75,7 @@ Changing any of these is a STOP condition, not a refactor.
 |---|---|
 | Project | `site-continuity-fleet` |
 | Core infrastructure | Sydney `australia-southeast1` |
-| Model Armor (planned) | Melbourne `australia-southeast2` |
+| Model Armor threat screening | Singapore `asia-southeast1` |
 | Gemini 3.7 Flash inference | Vertex AI `global` |
 | Cloud Run mutation | v1 `namespaces.services.replaceService` with `metadata.resourceVersion` |
 | Authoritative plane | Firestore `(default)` |
@@ -129,6 +129,10 @@ real against Google infrastructure, with the artifact saved*.
 | Hash-chained audit + tamper/truncation detection | `docs/evidence/gate-d3-lease-fencing-cas.md` |
 | Failure engineering (16 live fault scenarios) | `docs/evidence/gate-e-failure-engineering.md` |
 | Durable human approval across two process restarts | `docs/evidence/gate-f-durable-approval-resume.md` |
+| Real Model Armor screening of untrusted input (Singapore) | `docs/evidence/gate-g-model-armor-security.md` |
+| Blocked input never reaches the model | `docs/evidence/gate-g-model-armor-security.md` |
+| Screening fails closed; safe when it misses | `docs/evidence/gate-g-model-armor-security.md` |
+| No fleet identity can approve its own work | `docs/evidence/gate-g-model-armor-security.md` |
 | Approval bound to one decision by authorization fingerprint | `docs/evidence/gate-f-durable-approval-resume.md` |
 | Executor independently verifies human approval | `docs/evidence/gate-f-durable-approval-resume.md` |
 
@@ -150,7 +154,7 @@ platform failure to cite.
 | Aug 20 | Idempotency | **VERIFIED** |
 | Aug 21 | Failure engineering (Gate E) | **VERIFIED** |
 | Aug 22 | Durability / HITL (Gate F) | **VERIFIED** |
-| Aug 23 | Security / Model Armor | NOT STARTED |
+| Aug 23 | Security / Model Armor (Gate G) | **VERIFIED** |
 | Aug 24 | Fleet completion | NOT STARTED |
 | Aug 25 | Agent registry / lifecycle | NOT STARTED |
 | Aug 26 | Evaluation | NOT STARTED |
@@ -290,8 +294,12 @@ Stated plainly, in the repo as well as here:
 6. **Firestore isolation is database-level**, not collection-level — Google IAM
    cannot scope below a database.
 7. **Gemini inference is global.** Complete Australian residency is not claimed.
-8. **Model Armor is not integrated** — planned only. No prompt-injection
-   resistance is claimed.
+8. **Model Armor screens untrusted input in Singapore**, not Melbourne:
+   template Model Armor in `australia-southeast2` offers Sensitive Data
+   Protection without the prompt-injection detector. Complete prompt-injection
+   resistance is NOT claimed — a live policy-bypass attempt passed screening and
+   changed nothing, which is the point. Response screening is implemented but
+   not on the live path.
 9. **Cloud Trace is not integrated** — structured Cloud Logging correlation via
    `trace_id` only.
 10. **Only the Systems specialist has a deployed runtime.** Network, Security
@@ -387,11 +395,11 @@ Aug 31 is submission, link and access buffer **only**. No feature development.
 | Field | Value |
 |---|---|
 | Latest commit | see the tail of `git log --oneline` |
-| Offline tests | 515 collected (504 passed, 11 skipped) |
-| Current gate | Gate F closed |
+| Offline tests | 537 collected (526 passed, 11 skipped) |
+| Current gate | Gate G closed |
 | Gate E status | **VERIFIED**; external Codex catch-up audit pending on quota |
 | Gate F status | **VERIFIED**; same Codex catch-up audit pending |
-| Next gate | Aug 23 — Security / Model Armor. **Not started.** |
+| Next gate | Aug 24 — Fleet completion. **Not started.** |
 | Public repo | https://github.com/aish2897/after-hours-site-continuity-fleet |
 
 Deployed Cloud Run revisions (Sydney):

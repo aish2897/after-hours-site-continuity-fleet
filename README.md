@@ -105,7 +105,11 @@ capability beyond the state recorded here.
 | Hash-chained audit + tamper detection | **`VERIFIED`** | [`gate-d3`](docs/evidence/gate-d3-lease-fencing-cas.md) — chains verified against live incidents |
 | Trusted/untrusted evidence separation | `IMPLEMENTED` | `tests/policy/test_decision_matrix.py` |
 | Cloud Trace end-to-end spans | `NOT INTEGRATED` | logging correlation only |
-| Model Armor | `NOT INTEGRATED` | Melbourne, next |
+| Model Armor screening of untrusted input (Singapore) | **`VERIFIED`** | [`gate-g`](docs/evidence/gate-g-model-armor-security.md) |
+| Untrusted text screened before the model, blocked never reaches it | **`VERIFIED`** | [`gate-g`](docs/evidence/gate-g-model-armor-security.md) |
+| Screening fails closed when unavailable | **`VERIFIED`** | [`gate-g`](docs/evidence/gate-g-model-armor-security.md) |
+| Safe when screening MISSES an attack | **`VERIFIED`** | [`gate-g`](docs/evidence/gate-g-model-armor-security.md) — a live miss changed nothing |
+| Model Armor response screening | `IMPLEMENTED` | adapter supports it; not on the live path, so not claimed |
 | Approval state survives process replacement | **`VERIFIED`** | [`gate-f`](docs/evidence/gate-f-durable-approval-resume.md) — two orchestrator revisions replaced across one incident. A hard process kill mid-write is **not** proven: Cloud Run drains in-flight requests on redeploy |
 | Network / Security / Continuity runtimes | `NOT INTEGRATED` | systems only so far |
 | Duty-manager UI | `NOT INTEGRATED` | — |
@@ -128,7 +132,8 @@ Boundaries of the claim, stated precisely:
 - Durable persistence is proven; **crash-resumable workflow is not**.
 - Cloud Logging entries share a trace id across all four services, but **no
   span has been exported to Cloud Trace**.
-- **Model Armor is not integrated**, so no prompt-injection resistance is
+- **Model Armor screens untrusted input in Singapore**, and complete
+  prompt-injection resistance is still not
   claimed — only that untrusted content cannot reach an authorization path.
 - One investigator is deployed; the other three are contracts only.
 
@@ -148,7 +153,7 @@ See [`STATUS.md`](STATUS.md) for the current phase and next gate.
 | Concern | Location |
 |---|---|
 | Cloud Run, Firestore, Artifact Registry | Sydney `australia-southeast1` |
-| Model Armor inspection *(PLANNED, not integrated)* | Melbourne `australia-southeast2` |
+| Model Armor threat screening | Singapore `asia-southeast1` |
 | Gemini 3.7 Flash inference | `global` |
 
 Authoritative incident state, audit records, and privileged execution remain on
