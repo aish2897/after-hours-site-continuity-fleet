@@ -91,7 +91,7 @@ Real execution proof exists in `docs/evidence/`.
   truthy-string `budget_exceeded`, and an empty `proposal: {}`. The live proof
   matrix in the Gate E evidence is the single source for this split. No
   scenario produced more than one infrastructure change.**
-- **Closed failure taxonomy: 18 categories, one table fixing resting state,
+- **Closed failure taxonomy: 20 categories, one table fixing resting state,
   reconcilability, retry eligibility, audit event and manager summary**
 - **Deterministic escalation package: plain-language impact, what automation
   did and did not change, current service state, recommended action — no model

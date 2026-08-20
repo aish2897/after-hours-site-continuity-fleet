@@ -39,6 +39,8 @@ class FailureCategory(StrEnum):
     EXECUTOR_UNAVAILABLE = "EXECUTOR_UNAVAILABLE"
     EXECUTION_OUTCOME_UNKNOWN = "EXECUTION_OUTCOME_UNKNOWN"
     APPROVAL_REQUIRED_NO_APPROVER = "APPROVAL_REQUIRED_NO_APPROVER"
+    SECURITY_SCREENING_UNAVAILABLE = "SECURITY_SCREENING_UNAVAILABLE"
+    UNTRUSTED_CONTENT_BLOCKED = "UNTRUSTED_CONTENT_BLOCKED"
     APPROVAL_REJECTED = "APPROVAL_REJECTED"
     APPROVAL_EXPIRED = "APPROVAL_EXPIRED"
     VERIFIER_UNAVAILABLE = "VERIFIER_UNAVAILABLE"
@@ -165,6 +167,21 @@ HANDLING: dict[FailureCategory, FailureHandling] = {
         summary="This repair needs a person to authorize it, and the approval "
                 "step is not available yet, so nothing was changed.",
     ),
+    C.SECURITY_SCREENING_UNAVAILABLE: _h(
+        # Fail closed. Unscreened untrusted text must not reach the model just
+        # because the screener was unreachable — an availability problem is not
+        # a licence to skip a security control.
+        C.SECURITY_SCREENING_UNAVAILABLE, S.ESCALATED,
+        reconcilable=False, retry_eligible=False,
+        summary="The safety check on your report could not be completed, so it "
+                "was not processed automatically. Nothing was changed.",
+    ),
+    C.UNTRUSTED_CONTENT_BLOCKED: _h(
+        C.UNTRUSTED_CONTENT_BLOCKED, S.ESCALATED,
+        reconcilable=False, retry_eligible=False,
+        summary="The report contained content the safety check refused, so it "
+                "was not processed automatically. Nothing was changed.",
+    ),
     C.APPROVAL_REJECTED: _h(
         # A person said no. That is a legitimate, complete answer — and it still
         # has to go somewhere. Recording the rejection on the approval document
@@ -274,6 +291,10 @@ NEXT_ACTION: dict[FailureCategory, str] = {
     C.EXECUTION_OUTCOME_UNKNOWN: "Ask an operator to run reconciliation on this "
                                  "reference to confirm the result.",
     C.APPROVAL_REQUIRED_NO_APPROVER: "Contact the on-call incident commander to authorize this repair.",
+    C.SECURITY_SCREENING_UNAVAILABLE: "Report the problem again shortly, or "
+                                      "contact technical support if it is urgent.",
+    C.UNTRUSTED_CONTENT_BLOCKED: "Describe the problem in plain words, without "
+                                 "pasting messages or instructions from elsewhere.",
     C.APPROVAL_REJECTED: "No further automatic action will be taken. Contact "
                          "technical support if the site is still affected.",
     C.APPROVAL_EXPIRED: "Report the problem again if the site is still affected, "

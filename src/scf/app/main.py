@@ -41,6 +41,7 @@ from scf.domain.models import (
 )
 from scf.obs import log_event, trace_id_from_header
 from scf.policy import evaluate, trusted_evidence_map
+from scf.security import ScreeningUnavailable, screen_untrusted_text
 from scf.state import IncidentNotFound, IncidentRepository
 from scf.state.firestore_repo import ApprovalNotFound
 
@@ -153,6 +154,91 @@ async def create_incident(
         status=incident.status.value,
     )
 
+    # Screen the untrusted report BEFORE the model sees any of it.
+    #
+    # The ordering is the whole point. Screening afterwards would tell us what
+    # the model had already read, which is a description of the problem rather
+    # than a defence against it. Every event below carries the incident id, so
+    # the ordering is reconstructable from logs: a blocked incident has a
+    # MODEL_ARMOR_BLOCKED and no adk_invocation_started at all.
+    log_event(
+        "model_armor_screen_started",
+        trace_id=trace_id,
+        incident_id=incident_id,
+        model_armor_location=config.MODEL_ARMOR_LOCATION,
+        model_armor_template=config.MODEL_ARMOR_TEMPLATE,
+    )
+    try:
+        screening = await run_in_threadpool(
+            screen_untrusted_text, intake.description
+        )
+    except ScreeningUnavailable as unavailable:
+        # Fail CLOSED. Unscreened untrusted text does not reach the model just
+        # because the screener was down — an availability problem must not
+        # quietly become a security one. Bounded: one attempt, no retry loop.
+        log_event(
+            "model_armor_unavailable",
+            severity="ERROR",
+            trace_id=trace_id,
+            incident_id=incident_id,
+            failure_reason=unavailable.reason,
+        )
+        failed = await _fail(
+            repo,
+            incident_id,
+            WorkflowFailure(
+                FailureCategory.SECURITY_SCREENING_UNAVAILABLE,
+                f"security screening could not complete ({unavailable.reason})",
+            ),
+            trace_id,
+            {"attempted": True, "specialists_attempted": []},
+        )
+        final = await run_in_threadpool(repo.get, incident_id)
+        return IncidentCreated(
+            incident_id=incident_id,
+            status=final["status"],
+            summary=failed["escalation"]["impact"],
+            required_specialists=[],
+            routes=[],
+            remediation=failed,
+            trace_id=trace_id,
+        )
+
+    await run_in_threadpool(
+        repo.record_screening, incident_id, screening.as_log_fields(), trace_id=trace_id
+    )
+    if not screening.allowed:
+        log_event(
+            "model_armor_blocked",
+            severity="WARNING",
+            trace_id=trace_id,
+            incident_id=incident_id,
+            **screening.as_log_fields(),
+        )
+        blocked = await _fail(
+            repo,
+            incident_id,
+            WorkflowFailure(
+                FailureCategory.UNTRUSTED_CONTENT_BLOCKED,
+                f"screening refused the report: {', '.join(screening.triggered_filters)}",
+                triggered_filters=list(screening.triggered_filters),
+            ),
+            trace_id,
+            {"attempted": True, "specialists_attempted": []},
+        )
+        final = await run_in_threadpool(repo.get, incident_id)
+        return IncidentCreated(
+            incident_id=incident_id,
+            status=final["status"],
+            summary=blocked["escalation"]["impact"],
+            required_specialists=[],
+            routes=[],
+            remediation=blocked,
+            trace_id=trace_id,
+        )
+
+    log_event("model_armor_allowed", trace_id=trace_id, incident_id=incident_id,
+              **screening.as_log_fields())
     log_event("adk_invocation_started", trace_id=trace_id, incident_id=incident_id,
               model=config.VERIFIED_MODEL_ID, model_location=config.MODEL_LOCATION)
     try:

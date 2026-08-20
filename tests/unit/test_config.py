@@ -21,9 +21,16 @@ def test_the_planned_model_armor_region_is_australian():
     two constants differ. A test name is documentation, and that one claimed an
     integration the repo elsewhere denies having.
     """
-    assert config.MODEL_ARMOR_REGION == "australia-southeast2"
-    assert config.MODEL_ARMOR_REGION != config.CORE_REGION
-    assert config.MODEL_ARMOR_REGION.startswith("australia-")
+    # The PLANNED Melbourne region, kept only to document what was abandoned.
+    assert config.MODEL_ARMOR_REGION_ABANDONED == "australia-southeast2"
+    # What screening actually uses. Singapore, because Melbourne's template
+    # Model Armor offers Sensitive Data Protection without the prompt-injection
+    # detector — established by real calls, not by reading a table.
+    assert config.MODEL_ARMOR_LOCATION == "asia-southeast1"
+    assert config.MODEL_ARMOR_LOCATION != config.CORE_REGION
+    assert not config.MODEL_ARMOR_LOCATION.startswith("australia-"), (
+        "screening leaves Australia, and the docs must say so"
+    )
 
 
 def test_model_inference_location_is_global_by_decision():

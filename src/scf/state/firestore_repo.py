@@ -403,6 +403,37 @@ class IncidentRepository:
 
         return _apply(transaction)
 
+    def record_screening(
+        self, incident_id: str, screening: dict[str, Any], *, trace_id: str | None = None
+    ) -> None:
+        """Persist the screening verdict and audit it.
+
+        Metadata only — verdict, filter names, region, template, version, a hash
+        of what was screened. Never the raw text and never a matched value: the
+        report is untrusted content that may itself carry sensitive data, and an
+        evidence artifact that quotes it back has leaked it.
+
+        This is recorded as a security observation, NOT as `Evidence`. It never
+        reaches the policy gate, because a screening verdict authorizes nothing.
+        """
+        self._doc_ref(incident_id).update({"security_screening": screening})
+        self.append_audit(
+            incident_id,
+            actor="model_armor",
+            event="untrusted_content_screened",
+            payload={
+                "verdict": screening.get("verdict"),
+                "allowed": screening.get("allowed"),
+                "triggered_filters": screening.get("triggered_filters"),
+                "findings": screening.get("findings"),
+                "location": screening.get("model_armor_location"),
+                "template": screening.get("model_armor_template"),
+                "filter_version": screening.get("filter_version"),
+                "content_sha256": screening.get("content_sha256"),
+            },
+            trace_id=trace_id,
+        )
+
     def attach_approval_to_decision(
         self, incident_id: str, decision_id: str, approval_id: str
     ) -> None:

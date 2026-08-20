@@ -11,7 +11,20 @@ PROJECT_ID: Final[str] = "site-continuity-fleet"
 # therefore not claimed. ARCHITECTURE.md states the split in full.
 
 CORE_REGION: Final[str] = "australia-southeast1"  # Sydney
-MODEL_ARMOR_REGION: Final[str] = "australia-southeast2"  # Melbourne
+#: Model Armor screening region. NOT Melbourne, and the reason is empirical
+#: rather than a preference: template-based Model Armor in
+#: `australia-southeast2` offers Sensitive Data Protection only, without the
+#: prompt-injection/jailbreak detector this fleet screens for. Singapore has it,
+#: confirmed by real calls against the live API.
+#:
+#: The cost is stated plainly wherever residency is described: threat screening
+#: leaves Australia. Authoritative state and privileged execution do not.
+MODEL_ARMOR_LOCATION: Final[str] = "asia-southeast1"  # Singapore
+MODEL_ARMOR_TEMPLATE: Final[str] = "scf-untrusted-input"
+
+#: Kept as the OLD planned region purely so the residency documentation and its
+#: guard test can keep describing what was planned and why it was abandoned.
+MODEL_ARMOR_REGION_ABANDONED: Final[str] = "australia-southeast2"  # Melbourne
 
 CLOUD_RUN_REGION: Final[str] = CORE_REGION
 FIRESTORE_REGION: Final[str] = CORE_REGION

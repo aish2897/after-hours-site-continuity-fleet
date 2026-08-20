@@ -1,0 +1,9 @@
+title: scfPromptScreener
+description: >-
+  Use-only screening of untrusted text and model output through a Model Armor
+  template. Cannot create, update, delete or read a template, so it cannot
+  weaken the filter config it is screened against.
+stage: GA
+includedPermissions:
+  - modelarmor.templates.useToSanitizeUserPrompt
+  - modelarmor.templates.useToSanitizeModelResponse

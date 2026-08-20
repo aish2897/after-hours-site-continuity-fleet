@@ -53,6 +53,8 @@ EXECUTOR_5XX: Final[str] = "executor_5xx"
 EXECUTOR_DELAY_BEFORE_MUTATION: Final[str] = "executor_delay_before_mutation"
 VERIFIER_5XX: Final[str] = "verifier_5xx"
 VERIFIER_MALFORMED: Final[str] = "verifier_malformed"
+MODEL_ARMOR_UNAVAILABLE: Final[str] = "model_armor_unavailable"
+MODEL_ARMOR_MALFORMED: Final[str] = "model_armor_malformed"
 ROUTING_MALFORMED_JSON: Final[str] = "routing_malformed_json"
 ROUTING_SCHEMA_INVALID: Final[str] = "routing_schema_invalid"
 ROUTING_UNKNOWN_SPECIALIST: Final[str] = "routing_unknown_specialist"
@@ -72,6 +74,8 @@ KNOWN_MODES: Final[frozenset[str]] = frozenset(
         EXECUTOR_DELAY_BEFORE_MUTATION,
         VERIFIER_5XX,
         VERIFIER_MALFORMED,
+        MODEL_ARMOR_UNAVAILABLE,
+        MODEL_ARMOR_MALFORMED,
         ROUTING_MALFORMED_JSON,
         ROUTING_SCHEMA_INVALID,
         ROUTING_UNKNOWN_SPECIALIST,
