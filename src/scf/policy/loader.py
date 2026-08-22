@@ -79,8 +79,16 @@ class AgentEntry(Frozen):
     deployed: bool = False
     #: Lifecycle switch. A deployed agent can still be withdrawn from service —
     #: deprecated, under investigation, or simply not approved for use — and the
-    #: orchestrator must respect that without a redeploy.
+    #: orchestrator must respect that without any change to code. The catalog
+    #: ships inside the image, so applying it does take a redeploy; what it does
+    #: not take is editing the orchestrator.
     enabled: bool = True
+    #: Evidence keys this agent is competent to assert. Empty means unconstrained
+    #: — which is why every deployed specialist declares one. An agent returning
+    #: a key outside its own set is not making a finding, it is asserting
+    #: something it has no way to know, and the orchestrator drops it before the
+    #: policy gate can read it.
+    establishes: list[str] = []
 
 
 class AgentRegistry(Frozen):
@@ -103,6 +111,18 @@ class AgentRegistry(Frozen):
 
     def selectable_specialists(self) -> list[str]:
         return sorted(name for name in self.agents if self.is_selectable(name))
+
+    def may_establish(self, agent_name: str, key: str) -> bool:
+        """May this agent assert this evidence key?
+
+        DISCOVERY and evidence scoping only. Like `is_selectable`, this can
+        never authorize a mutation — it only narrows what an agent is allowed to
+        claim to have observed. Widening it grants no new capability to anyone.
+        """
+        entry = self.agents.get(agent_name)
+        if entry is None:
+            return False
+        return not entry.establishes or key in entry.establishes
 
     def may_propose(self, agent_name: str) -> bool:
         entry = self.agents.get(agent_name)

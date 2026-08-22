@@ -156,7 +156,7 @@ platform failure to cite.
 | Aug 21 | Failure engineering (Gate E) | **VERIFIED** |
 | Aug 22 | Durability / HITL (Gate F) | **VERIFIED** |
 | Aug 23 | Security / Model Armor (Gate G) | **VERIFIED** |
-| Aug 24 | Fleet completion (Gate H) | **IN PROGRESS** — H0-H4, H7-H9 done; H5, H6, H10-H13 remain |
+| Aug 24 | Fleet completion (Gate H) | **DONE — VERIFIED Aug 22** |
 | Aug 25 | Agent registry / lifecycle | NOT STARTED |
 | Aug 26 | Evaluation | NOT STARTED |
 | Aug 27 | Reliability | NOT STARTED |
@@ -413,23 +413,24 @@ Aug 31 is submission, link and access buffer **only**. No feature development.
 
 | Field | Value |
 |---|---|
-| Latest commit | `06264ea` — approval moved to its own service |
-| Offline tests | 589 collected (578 passed, 11 skipped) |
-| Current gate | Gate H **IN PROGRESS**; Codex catch-up High 1 and High 2 both closed |
+| Latest commit | see `git log --oneline -1` |
+| Offline tests | 596 collected (585 passed, 11 skipped) |
+| Current gate | **Gate H CLOSED / VERIFIED** — full fleet, selective routing, registry governance |
 | Gate E status | **VERIFIED**; Codex catch-up findings fixed |
 | Gate F status | **VERIFIED**; approval identity corrected by Codex High 2 |
 | Gate G status | **VERIFIED** (Model Armor live, including a documented miss) |
 | Codex High 1 | **CLOSED** — any screening failure fails closed without a 500 |
 | Codex High 2 | **CLOSED** — approval lives on `scf-approval`; IAM is the gate |
-| Next | Resume Gate H: H5, H6, H10, H11, H12, H13. **Do not start the UI gate.** |
+| Gate H status | **VERIFIED** — see `docs/evidence/gate-h-fleet-registry.md` |
+| Next | Director UI Alpha. **Not started, not yet authorized.** |
 | Public repo | https://github.com/aish2897/after-hours-site-continuity-fleet |
 
 Deployed Cloud Run revisions (Sydney):
 
 | Service | Revision |
 |---|---|
-| `scf-orchestrator` | `scf-orchestrator-00166-gd9` |
-| `scf-agent-systems` | `scf-agent-systems-00117-ffl` |
+| `scf-orchestrator` | `scf-orchestrator-00170-9qd` |
+| `scf-agent-systems` | `scf-agent-systems-00126-ksp` |
 | `scf-agent-network` | `scf-agent-network-00001-dh7` |
 | `scf-agent-security` | `scf-agent-security-00001-2d4` |
 | `scf-agent-continuity` | `scf-agent-continuity-00001-mng` |

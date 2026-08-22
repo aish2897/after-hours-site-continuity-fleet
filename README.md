@@ -96,6 +96,12 @@ capability beyond the state recorded here.
 | Resumable human approval | **`VERIFIED`** | [`gate-f`](docs/evidence/gate-f-durable-approval-resume.md) |
 | Approval lives on a service no fleet identity can invoke | **`VERIFIED`** | [`high-2`](docs/evidence/codex-high-2-approval-authorization.md) — six service accounts, unauthenticated, and spoofed identity headers all refused |
 | Approver identity independently verified by the application | `NOT INTEGRATED` | IAP is not in front of `scf-approval`; the gate is Cloud Run IAM and the record says `PLATFORM_IAM`, not a person. IAP verification is implemented and unit-tested but not live — see [`high-2`](docs/evidence/codex-high-2-approval-authorization.md) |
+| Five agent roles deployed, four distinct specialist identities | **`VERIFIED`** | [`gate-h`](docs/evidence/gate-h-fleet-registry.md) |
+| Selective routing — different incidents consult different specialists | **`VERIFIED`** | [`gate-h`](docs/evidence/gate-h-fleet-registry.md) — systems-only, security-only, network-only and multi-specialist runs. Routing is model-driven and not deterministic; the matrix records real runs, not a guaranteed mapping |
+| Secondary delegation driven by trusted evidence, not by the report | **`VERIFIED`** | [`gate-h`](docs/evidence/gate-h-fleet-registry.md) — routing ruled Systems out; a TCP/TLS probe brought it back in |
+| An agent withdrawn by the registry cannot be selected | **`VERIFIED`** | [`gate-h`](docs/evidence/gate-h-fleet-registry.md) — model asked for it, catalog refused, nothing consulted |
+| Network / Security / Continuity agents cannot mutate anything | **`VERIFIED`** | [`gate-h`](docs/evidence/gate-h-fleet-registry.md) — real Google 403s on Cloud Run and Firestore, read and write |
+| An agent cannot assert another agent's findings | **`VERIFIED`** | [`gate-h`](docs/evidence/gate-h-fleet-registry.md) — per-agent evidence competence enforced before the policy gate |
 | Ambiguous mutation outcome kept reconcilable (only 409 proves refusal) | `IMPLEMENTED` | `tests/unit/test_failure_engineering.py` · `tests/unit/test_lease_fencing.py` — no live non-409 failure has been produced by Google, so this is not claimed as verified |
 | Closed incident cannot be re-executed | **`VERIFIED`** | [`gate-d3`](docs/evidence/gate-d3-lease-fencing-cas.md) |
 | Reconciliation after an unreachable executor | **`VERIFIED`** | [`gate-d3`](docs/evidence/gate-d3-lease-fencing-cas.md) |

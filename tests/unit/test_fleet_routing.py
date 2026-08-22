@@ -240,3 +240,151 @@ def test_a_specialist_never_receives_raw_manager_text():
     assert "target_url" in source
     # The probe target comes from configuration, never from the report.
     assert "config.dispatch_web_url()" in source
+
+
+# --- the Coordinator must not describe work that never happened --------------
+
+
+def test_an_unattempted_run_is_reported_as_nothing_changed():
+    """"Not attempted" is a known outcome, not an unknown one.
+
+    Found live: a security-only incident that reached ESCALATED without any
+    remediation told the duty manager "a repair was sent but we could not
+    confirm whether it took effect". Nothing had been sent. The escalate branch
+    of `_run_fleet` sets no `mutated_infrastructure`, and `None` is the
+    Coordinator's sentinel for an unconfirmed mutation.
+    """
+    source = inspect.getsource(main._compose_manager_status)
+    # Presence, not `.get()`. An absent key is "nothing changed"; only an
+    # explicitly stored None is the genuine unknown.
+    assert '"mutated_infrastructure" in outcome' in source
+    assert 'outcome.get("mutated_infrastructure")' not in source
+
+    unattempted = continuity.ContinuityRequest(
+        incident_id="INC-1",
+        identity_posture_sound=False,
+        specialists_consulted=["security"],
+        remediation_state="ESCALATED",
+        changed_anything=False,
+    )
+    next_step = continuity._what_happens_next(unattempted)
+    assert "repair was sent" not in next_step
+    assert "nothing on your site has been changed" in next_step.lower()
+
+
+def test_a_genuinely_unknown_outcome_still_says_so():
+    """The fix must not flatten the real unknown case into a false negative."""
+    unknown = continuity.ContinuityRequest(
+        incident_id="INC-2",
+        remediation_state="EXECUTED",
+        changed_anything=None,
+    )
+    assert "could not confirm" in continuity._what_happens_next(unknown)
+
+
+def test_the_unknown_sentinel_survives_only_when_it_was_actually_stored():
+    """Absent key vs stored None are different facts and must stay different."""
+    import asyncio
+    from unittest.mock import patch
+
+    async def _compose(outcome):
+        captured = {}
+
+        async def _fake_call(_url, _path, payload, **_kw):
+            captured.update(payload)
+            return {}
+
+        with patch.object(main, "CONTINUITY_URL", "https://continuity.invalid"),              patch.object(main, "_call", _fake_call):
+            await main._compose_manager_status("INC-1", [], {}, outcome, None, None)
+        return captured
+
+    # Nothing was ever executed: the key is absent.
+    assert asyncio.run(_compose({"attempted": False}))["changed_anything"] is False
+    # Systems ran, policy refused: still no executor call, still absent.
+    assert asyncio.run(_compose(
+        {"attempted": True, "final_status": "ESCALATED"}
+    ))["changed_anything"] is False
+    # A receipt reported an indeterminate effect: stored None, and it survives.
+    assert asyncio.run(_compose(
+        {"attempted": True, "mutated_infrastructure": None}
+    ))["changed_anything"] is None
+    # A mutation landed.
+    assert asyncio.run(_compose(
+        {"attempted": True, "mutated_infrastructure": True}
+    ))["changed_anything"] is True
+
+
+# --- an agent may only assert what it is competent to observe ----------------
+
+
+def test_an_investigator_cannot_assert_another_agents_findings():
+    """The exact evidence that authorizes an automatic traffic flip.
+
+    A Network investigator resolves DNS and opens sockets. It has no way to
+    observe whether a revision was blessed by an operator, so a claim that it
+    was is dropped before the policy gate sees it — otherwise a single bad
+    specialist could manufacture `AUTO_ALLOWED`.
+    """
+    from scf.domain.models import Evidence
+    from scf.domain.enums import TrustLevel
+
+    forged = [
+        Evidence(source_agent="network", key=key, value=value,
+                 supports="fabricated", trust_level=TrustLevel.TRUSTED_TOOL)
+        for key, value in (
+            ("network_reachable", True),
+            ("service_unhealthy", True),
+            ("candidate_revision_approved", True),
+            ("candidate_probe_healthy", True),
+        )
+    ]
+    kept = main._within_competence(
+        "network", forged, incident_id="INC-1", trace_id=None
+    )
+    assert [item.key for item in kept] == ["network_reachable"]
+
+    from scf.policy.engine import trusted_evidence_map
+
+    facts = trusted_evidence_map(kept)
+    for authorizing in ("service_unhealthy", "candidate_revision_approved",
+                        "candidate_probe_healthy"):
+        assert authorizing not in facts
+
+
+def test_every_deployed_specialist_declares_its_competence():
+    """An empty set is unconstrained, so a deployed agent must not have one."""
+    registry = default_registry()
+    for name in ("systems", "network", "security"):
+        assert registry.agents[name].establishes, name
+
+
+def test_the_declared_keys_match_what_the_tools_actually_emit():
+    """A stale declaration silently drops real evidence."""
+    import re
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[2]
+    sources = {
+        "network": root / "src/scf/tools/network_evidence.py",
+        "security": root / "src/scf/tools/security_evidence.py",
+        "systems": root / "src/scf/tools/cloud_run_evidence.py",
+    }
+    registry = default_registry()
+    for agent, path in sources.items():
+        emitted = set(re.findall(r'_ev\(\s*"([a-z_]+)"', path.read_text(encoding="utf-8")))
+        declared = set(registry.agents[agent].establishes)
+        assert emitted <= declared, (
+            f"{agent} emits {sorted(emitted - declared)} which the registry "
+            f"would drop"
+        )
+
+
+def test_competence_scoping_cannot_authorize_anything():
+    """Same rule as is_selectable: discovery only, never authority."""
+    from scf.policy import engine
+    from scf.policy.loader import AgentRegistry
+
+    assert "never authorize a mutation" in inspect.getsource(
+        AgentRegistry.may_establish
+    )
+    assert "may_establish" not in inspect.getsource(engine)

@@ -874,6 +874,9 @@ async def _run_remediation(
             f"investigator evidence rejected: {type(exc).__name__}",
         ) from exc
 
+    evidence = _within_competence(
+        "systems", evidence, incident_id=incident_id, trace_id=trace_id
+    )
     await run_in_threadpool(repo.save_evidence, incident_id, evidence, trace_id=trace_id)
     outcome["evidence_count"] = len(evidence)
     outcome["evidence_keys"] = [item.key for item in evidence]
@@ -2450,6 +2453,51 @@ EVIDENCE_SPECIALISTS: dict[str, str] = {
 }
 
 
+def _within_competence(
+    agent: str,
+    evidence: list[Evidence],
+    *,
+    incident_id: str,
+    trace_id: str | None,
+) -> list[Evidence]:
+    """Drop findings an agent had no way to make.
+
+    Gate H put three investigators on the evidence path where there had been
+    one, and nothing tied a finding to the agent qualified to make it. The
+    Network investigator resolves DNS and opens sockets; it cannot observe
+    whether a Cloud Run revision was blessed by an operator. If it said so
+    anyway — compromised, mis-deployed, or simply wrong — that claim would have
+    reached the policy gate as `TRUSTED_TOOL` and satisfied the required
+    evidence for an automatic traffic flip.
+
+    Authentication cannot catch this: the specialist really is who it says it
+    is. The registry can, because competence is a static property of the agent
+    rather than something the request gets to assert.
+
+    Dropping is deliberate over failing the incident. A single out-of-scope key
+    is a defect in one agent, and the remaining evidence is still worth what it
+    was worth; the gate refuses on its own when what is left is insufficient.
+    """
+    registry = default_registry()
+    kept, refused = [], []
+    for item in evidence:
+        if registry.may_establish(agent, item.key):
+            kept.append(item)
+        else:
+            refused.append(item.key)
+    if refused:
+        log_event(
+            "evidence_outside_agent_competence",
+            severity="WARNING",
+            trace_id=trace_id,
+            incident_id=incident_id,
+            agent=agent,
+            refused_keys=refused,
+            kept=len(kept),
+        )
+    return kept
+
+
 async def _consult(
     specialist: str,
     incident_id: str,
@@ -2477,7 +2525,12 @@ async def _consult(
             service=specialist,
             trace_header=trace_header,
         )
-        return [Evidence.model_validate(item) for item in (body.get("evidence") or [])]
+        return _within_competence(
+            specialist,
+            [Evidence.model_validate(item) for item in (body.get("evidence") or [])],
+            incident_id=incident_id,
+            trace_id=trace_id,
+        )
     except (DownstreamFailure, ValidationError, KeyError, TypeError) as exc:
         log_event(
             "specialist_unavailable",
@@ -2520,7 +2573,19 @@ async def _compose_manager_status(
                 "identity_posture_sound": facts.get("identity_posture_sound"),
                 "remediation_state": str(outcome.get("final_status") or ""),
                 "awaiting_human": bool(outcome.get("approval")),
-                "changed_anything": outcome.get("mutated_infrastructure"),
+                # Presence, not truthiness. The key is written only when an
+                # executor receipt reported an effect that was present or
+                # indeterminate, so an ABSENT key means nothing changed and an
+                # explicit `None` means a mutation whose outcome we genuinely
+                # cannot establish. `.get()` collapses those into the same
+                # value, and the Coordinator reads `None` as "a repair was sent
+                # but we could not confirm it" — which it then told a duty
+                # manager about an incident where no executor was ever called.
+                "changed_anything": (
+                    outcome["mutated_infrastructure"]
+                    if "mutated_infrastructure" in outcome
+                    else False
+                ),
             },
             service="continuity",
             trace_header=trace_header,

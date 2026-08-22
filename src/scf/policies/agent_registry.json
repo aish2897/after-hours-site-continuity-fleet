@@ -28,7 +28,24 @@
         "read_revision_history"
       ],
       "deployed": true,
-      "enabled": true
+      "enabled": true,
+      "establishes": [
+        "service_exists",
+        "service_url",
+        "service_etag",
+        "active_revision",
+        "http_status",
+        "http_body",
+        "service_unhealthy",
+        "candidate_revision",
+        "candidate_revision_approved",
+        "candidate_probe_url",
+        "candidate_probe_http_status",
+        "candidate_probe_healthy",
+        "fallback_candidate_revision",
+        "fallback_candidate_probe_http_status",
+        "fallback_candidate_probe_healthy"
+      ]
     },
     "network": {
       "version": "1.0.0",
@@ -41,7 +58,19 @@
         "read_dns_status"
       ],
       "deployed": true,
-      "enabled": true
+      "enabled": true,
+      "establishes": [
+        "network_target_host",
+        "dns_resolves",
+        "dns_addresses",
+        "dns_latency_ms",
+        "dns_error",
+        "tcp_connect_ok",
+        "tls_handshake_ok",
+        "connect_latency_ms",
+        "connect_error",
+        "network_reachable"
+      ]
     },
     "security": {
       "version": "1.0.0",
@@ -54,7 +83,18 @@
         "classify_untrusted_content"
       ],
       "deployed": true,
-      "enabled": true
+      "enabled": true,
+      "establishes": [
+        "security_target_service",
+        "iam_policy_readable",
+        "invoker_binding_count",
+        "public_invokers",
+        "named_invokers",
+        "publicly_invokable",
+        "ingress",
+        "service_generation",
+        "identity_posture_sound"
+      ]
     },
     "continuity": {
       "version": "1.0.0",

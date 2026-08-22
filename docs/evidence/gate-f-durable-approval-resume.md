@@ -7,6 +7,18 @@ Sanitized. No credentials, no bearer tokens, no model reasoning. Synthetic data
 only. Every state below was read back from Firestore by a process that did not
 create it.
 
+> **Superseded in one respect — read alongside
+> [`codex-high-2-approval-authorization.md`](codex-high-2-approval-authorization.md).**
+> The transcript below is left exactly as it was recorded, including the
+> `demo-approver@site-continuity-fleet.invalid` principal. That name is what the
+> mechanism produced at Gate F, and it was the defect Codex High 2 found: the
+> approver's identity was taken from the request rather than established.
+> Approval now lives on `scf-approval`, a separate Cloud Run service whose
+> `run.invoker` is held by one human principal and by no service account, so
+> Google Cloud IAM is the human authorization boundary. Everything else Gate F
+> proves — durability, restart survival, fingerprint binding, independent
+> executor verification, resume — is unchanged.
+
 ## What is being demonstrated
 
 A high-risk action that a person must authorize, where the authorization
