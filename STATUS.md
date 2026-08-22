@@ -105,21 +105,21 @@ Real execution proof exists in `docs/evidence/`.
 
 ## IN PROGRESS
 
-Nothing. Gate E is closed.
+Gate I — Director UI Alpha. Deployed but **not yet accepted**: acceptance
+requires hands-on testing by the Director.
 
 ## NOT STARTED
 
 - Automatic sweep of reconcilable incidents (`/reconcile` is operator-triggered)
-- Human approval and resume
-- Crash-resumable workflow
 - Model Armor response screening on the live path (the adapter supports it)
 - Cloud Trace end-to-end spans
-- Network Investigator runtime
-- Security & Identity Investigator runtime
-- Continuity Coordinator runtime
-- Duty-manager UI
 - Evaluation suite
 - Additional Google models / bonus categories
+
+Delivered since this list was last accurate: human approval and resume (Gate F),
+Model Armor on untrusted input (Gate G), the Network, Security & Identity and
+Continuity runtimes (Gate H), and a separated human approval service
+(`scf-approval`, Codex High 2).
 
 ## HONEST LIMITATIONS
 
@@ -157,9 +157,8 @@ Nothing. Gate E is closed.
 
 ## NEXT HARD GATE
 
-Durability and human-in-the-loop approval (Gate F / Aug 22). Not yet authorized.
-Then Model Armor inspection of untrusted content before agent use, and the
-remaining fleet investigators.
+Director acceptance of the Gate I UI, by hands-on testing of the hosted product.
+Gates E, F, G and H are closed and verified.
 
 ## FROZEN ARCHITECTURE RULES
 

@@ -208,7 +208,7 @@ LLM-backed specialists:
 agent-registry agents` offers describe/list/search and no create; `POST
 .../locations/*/agents` returns 404; `bindings create` binds two *existing*
 agents rather than registering one. A Cloud Run service cannot be registered as
-an Agent resource today, so governance uses the local runtime catalog
+an Agent resource today, so governance uses a **local governed runtime catalog**
 (`agent_registry.json`) with `deployed` + `enabled` lifecycle flags. The blocker
 is external and is recorded rather than worked around.
 

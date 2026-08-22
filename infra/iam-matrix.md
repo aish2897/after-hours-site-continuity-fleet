@@ -1,149 +1,85 @@
-# IAM Matrix
+# IAM matrix — as provisioned
 
-What actually exists. This file describes provisioned reality, not intent.
+Read from the live project on **2026-08-22**, not from intent. Where a row could
+not be verified it says `UNKNOWN` rather than guessing.
 
-Every identity is a distinct Google service account. **No account holds
-project-level `roles/run.admin`, Owner, Editor, or IAM administration.** No
-service-account key file was ever created or downloaded.
+Project `site-continuity-fleet`, region `australia-southeast1`.
 
-## Provisioned identities
+## Project-level roles
 
-| Identity | Binding | Bound at |
-|---|---|---|
-| `sa-orchestrator` | `datastore.user`, `aiplatform.user`, `logging.logWriter` | project |
-| `sa-orchestrator` | `scfPromptScreener` (custom, use-only) | project |
-| `sa-orchestrator` | `roles/run.invoker` | `scf-agent-systems`, `scf-executor`, `scf-verifier` |
-| `sa-agent-systems` | `roles/run.viewer` | `dispatch-web` service |
-| `sa-agent-systems` | `logging.logWriter` | project |
-| `sa-executor` | `scfRemediator` (custom) | `dispatch-web` service |
-| `sa-executor` | `scfArtifactReader` (custom) | `cloud-run-source-deploy` repository |
-| `sa-executor` | `roles/iam.serviceAccountUser` | `sa-dispatch-web` account |
-| `sa-executor` | `scfDecisionReader` (custom) | Firestore `(default)`, IAM-conditioned, **read only** |
-| `sa-executor` | `scfExecutionWriter` (custom) | Firestore `execution-state`, IAM-conditioned, **no delete** |
-| `sa-executor` | `logging.logWriter` | project |
-| `sa-verifier` | `roles/run.viewer` | `dispatch-web` service |
-| `sa-verifier` | `logging.logWriter` | project |
-| `sa-dispatch-web` | *(none)* | — |
+Every service account also holds `roles/logging.logWriter`; it is omitted below.
 
-The orchestrator can *invoke* the executor but holds none of its
-infrastructure privileges. The verifier runs under a different identity from
-the executor, so the component that acts never grades its own work.
-
-Not yet created: `sa-agent-network`, `sa-agent-security`, `sa-agent-continuity`,
-`sa-approval-api`. Those belong to later gates.
-
-## Custom roles
-
-```
-scfRemediator        run.services.get
-                     run.services.update
-  bound on: dispatch-web service resource only
-
-scfPromptScreener    modelarmor.templates.useToSanitizeUserPrompt
-                     modelarmor.templates.useToSanitizeModelResponse
-  bound on: project, sa-orchestrator only. Use-only: cannot get, list, create,
-  update or delete a template, so this identity cannot read or weaken the
-  filter configuration it is screened against. sa-executor holds no Model
-  Armor permission of any kind.
-  Narrower than the predefined roles/modelarmor.user, which additionally
-  grants four sanitize verbs this fleet never calls.
-
-scfArtifactReader    artifactregistry.repositories.downloadArtifacts
-  bound on: cloud-run-source-deploy repository resource only
-
-scfDecisionReader    datastore.databases.get, datastore.entities.get
-  condition: resource.name.startsWith(".../databases/(default)")
-
-scfExecutionWriter   datastore.databases.get, datastore.entities.get,
-                     datastore.entities.create, datastore.entities.update
-  condition: resource.name.startsWith(".../databases/execution-state")
-```
-
-Every permission set was minimised empirically, not assumed:
-
-- `run.revisions.get` and `run.revisions.list` were candidates and proved
-  unnecessary for traffic migration.
-- `run.operations.get` was initially included, then removed: a Cloud Run
-  operation is a distinct resource from the service, so a service-scoped role
-  cannot read it. Rather than broaden the grant, operation polling was deleted
-  and the independent verifier establishes recovery instead.
-- `artifactregistry.repositories.downloadArtifacts` surfaced only by attempting
-  the operation — Cloud Run validates the revision's image reference during a
-  traffic update.
-- No predefined `datastore.viewer` or `datastore.user` was needed for the
-  executor.
-
-**Condition syntax finding:** `resource.name == ".../databases/(default)"` does
-not match. Firestore evaluates the condition against the document resource
-path, so `startsWith` on the database prefix is required.
-
-Neither Firestore role grants `datastore.entities.delete`, so an idempotency
-claim cannot be retracted to permit a replay.
-
-## Why `sa-dispatch-web` exists
-
-Cloud Run requires `iam.serviceAccounts.actAs` over the target service's
-runtime identity. By default that is the project's default compute service
-account, which holds **`roles/editor`**. Granting the executor actAs over it
-would have allowed deploying a revision running as an Editor-privileged
-identity — a project-wide escalation disguised as a narrow traffic permission.
-
-`dispatch-web` therefore runs as `sa-dispatch-web`, which holds no project
-roles, and the executor's actAs is scoped to that one account resource.
-
-## Two-plane Firestore isolation
-
-| Plane | Database | Executor access |
-|---|---|---|
-| Authoritative control | `(default)` | read only |
-| Execution | `execution-state` | create/update, no delete |
-
-The rule: **the identity able to mutate Cloud Run must be unable to modify the
-authorization decision permitting that mutation.**
-
-This is database-level isolation. Firestore IAM cannot scope below a database;
-within `execution-state` the executor can write any collection. The boundary is
-that no authorization truth lives there.
-
-## Proofs captured
-
-All are real Google responses, saved under `docs/evidence/`.
-
-| # | Actor | Attempt | Result |
-|---|---|---|---|
-| **A** | `sa-agent-systems` | update traffic on `dispatch-web` | 403 `run.services.update` denied |
-| **B** | `sa-executor` | update traffic on `dispatch-web` | success, 503 → 200 |
-| **C** | `sa-executor` | update traffic on `site-directory` | 403 `run.services.get` denied |
-| **D.1a** | `sa-executor` | read decision in `(default)` | allowed |
-| **D.1b** | `sa-executor` | create / update / delete decision in `(default)` | 403 on all three |
-| **D.1c** | `sa-executor` | write audit or incident in `(default)` | 403 |
-| **D.1d** | `sa-executor` | create idempotency claim in `execution-state` | allowed |
-| **D.1e** | `sa-executor` | delete idempotency claim in `execution-state` | 403 |
-
-Proof C matters most for blast radius: the boundary is scoped to a resource,
-not merely to an identity. Proof D.1b matters most for integrity: the executor
-cannot author the authority it acts on.
-
-Transcripts: `gate-c-iam-boundary.md`, `gate-d1-executor-firestore-isolation.md`.
-
-## Gate D.3 — no IAM was changed
-
-Moving the mutation from Cloud Run v2 `services.patch` to v1
-`namespaces.services.replaceService` required **no additional permission**. The
-existing resource-scoped `scfRemediator` (`run.services.get`,
-`run.services.update` on `dispatch-web` only) covers both.
-
-Re-tested after the change, as the real `sa-executor`:
-
-| Attempt | Result |
+| Service account | Project-level roles beyond logging |
 |---|---|
-| v1 `GET` `site-directory` | 403 `run.services.get` denied |
-| v1 `PUT` `site-directory` | 403 `run.services.update` denied |
-| v1 `GET` `dispatch-web` | 200 — the authorized target is still readable |
-| Firestore `(default)` read incident | 200 |
-| Firestore `(default)` create forged decision | 403 |
-| Firestore `(default)` patch incident status to RESOLVED | 403 |
-| Firestore `execution-state` delete execution record | 403 |
+| `sa-orchestrator` | `roles/aiplatform.user`, `roles/datastore.user`, custom `scfPromptScreener` |
+| `sa-agent-systems` | **none** |
+| `sa-agent-network` | **none** |
+| `sa-agent-security` | **none** |
+| `sa-agent-continuity` | **none** |
+| `sa-executor` | custom `scfDecisionReader`, custom `scfExecutionWriter` |
+| `sa-verifier` | **none** |
+| `sa-approval` | `roles/datastore.user` |
 
-Changing API version did not widen authority, and the Gate D.1 two-plane
-boundary is intact. Transcript: `gate-d3-lease-fencing-cas.md`.
+No service account holds project-level `roles/run.admin`.
+
+The three investigators and the verifier hold **no Firestore access at all** —
+not `datastore.user`, not `datastore.viewer`. This is tighter than originally
+planned. They are stateless: they receive identifiers, perform tool calls under
+their own identity, and return typed evidence over authenticated HTTP. The
+orchestrator is the only agent-side writer.
+
+## Per-service invoker policy
+
+| Cloud Run service | Bindings on the service |
+|---|---|
+| `scf-orchestrator` | none — reachable only via project-level permission (the human operator) |
+| `scf-agent-systems` | `run.invoker`: `sa-orchestrator` |
+| `scf-agent-network` | `run.invoker`: `sa-orchestrator` |
+| `scf-agent-security` | `run.invoker`: `sa-orchestrator` |
+| `scf-agent-continuity` | `run.invoker`: `sa-orchestrator` |
+| `scf-executor` | `run.invoker`: `sa-orchestrator` |
+| `scf-verifier` | `run.invoker`: `sa-orchestrator` |
+| **`scf-approval`** | `run.invoker`: **`user:arslanali.2897@gmail.com`** — one human, no service account |
+| `dispatch-web` (target) | `run.invoker`: `allUsers`; `run.viewer`: `sa-agent-systems`, `sa-agent-security`, `sa-verifier`; custom **`scfRemediator`: `sa-executor`** |
+
+`dispatch-web` is public on purpose: it is the synthetic outage target, and its
+health has to be probeable the way a real site would be. It holds no data.
+
+## The boundaries that matter
+
+**Only `sa-executor` can mutate.** The custom `scfRemediator` role
+(`run.services.get`, `run.services.update`, `run.revisions.get`,
+`run.revisions.list`) is bound **on the `dispatch-web` service resource only**,
+never project-wide. A fully compromised executor cannot touch any other service.
+
+**No autonomous identity can approve.** `run.invoker` on `scf-approval` is held
+by one human principal. Proven live against all six fleet identities, an
+unauthenticated caller, and forged identity headers — see
+[`codex-high-2`](../docs/evidence/codex-high-2-approval-authorization.md).
+
+**Investigators cannot change anything.** Real Google 403s for Cloud Run
+mutation and Firestore writes, for all three — see
+[`gate-h`](../docs/evidence/gate-h-fleet-registry.md). Network and Continuity are
+denied at `run.services.get`; Security is denied at `run.services.update`,
+because reading the IAM policy is its job and it is stopped exactly at the write.
+
+**Verification is not self-grading.** `sa-verifier` holds `run.viewer` on the
+target and no mutation capability, so the identity that acts is never the
+identity that confirms the act.
+
+## Honest caveats
+
+- **Firestore IAM is per-database, not per-collection.** The read/write split
+  above is genuinely enforced; finer-grained scoping within a database is not.
+  Two databases are used — `(default)` for the authoritative plane and
+  `execution-state` for the execution plane — with per-database conditions.
+- **`sa-approval` holds `datastore.user`**, which is broader than "approvals
+  only". The approval service writes only approval decisions, but that
+  restriction is application code, not IAM.
+- **Impersonation grants used for denial proofs were temporary.** Where
+  `roles/iam.serviceAccountTokenCreator` was needed to mint a token for a proof,
+  it was granted to the human principal, the proof run, and the grant revoked.
+  `sa-agent-systems` and `sa-executor` retain it from the Gate C denial work.
+- No `sa-approval-api` and no Secret Manager binding exist. An earlier plan
+  named them; the approval service uses Cloud Run IAM instead and holds no
+  signing key.

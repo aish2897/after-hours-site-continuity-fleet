@@ -77,11 +77,21 @@ def _injected_payload() -> str | None:
     return None
 
 
-async def route_incident(report_text: str) -> RoutingDecision:
+async def route_incident(
+    report_text: str,
+    image: tuple[bytes, str] | None = None,
+) -> RoutingDecision:
     """Run the ADK agent and promote its output into the domain contract.
 
     The report is passed as untrusted data. A response that does not satisfy
     RoutingLlmOutput raises rather than being retried as freeform text.
+
+    `image` is an optional (bytes, media_type) screenshot. It is untrusted for
+    exactly the same reason the text is, and it is constrained the same way:
+    whatever the picture contains, the only thing the model may emit is a set of
+    specialists drawn from a closed enum plus a transcription. It cannot emit an
+    action, a decision, or evidence. A screenshot therefore cannot authorize
+    anything — it can only change who gets asked to look.
     """
     injected = _injected_payload()
     if injected is not None:

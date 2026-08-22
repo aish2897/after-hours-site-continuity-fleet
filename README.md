@@ -119,8 +119,8 @@ capability beyond the state recorded here.
 | Safe when screening MISSES an attack | **`VERIFIED`** | [`gate-g`](docs/evidence/gate-g-model-armor-security.md) — a live miss changed nothing |
 | Model Armor response screening | `IMPLEMENTED` | adapter supports it; not on the live path, so not claimed |
 | Approval state survives process replacement | **`VERIFIED`** | [`gate-f`](docs/evidence/gate-f-durable-approval-resume.md) — two orchestrator revisions replaced across one incident. A hard process kill mid-write is **not** proven: Cloud Run drains in-flight requests on redeploy |
-| Network / Security / Continuity runtimes | `NOT INTEGRATED` | systems only so far |
-| Duty-manager UI | `NOT INTEGRATED` | — |
+| Network / Security / Continuity runtimes | **`VERIFIED`** | [`gate-h`](docs/evidence/gate-h-fleet-registry.md) — all three deployed under their own identities, all three deterministic and read-only |
+| Duty-manager UI | `IN PROGRESS` | Gate I — Director UI Alpha; not yet accepted by hands-on test |
 
 Boundaries of the claim, stated precisely:
 
@@ -176,13 +176,13 @@ Vertex AI's `global` endpoint as a deliberate, documented architecture choice.
 **Complete Australian data residency is not claimed.** The competition
 environment uses synthetic data only.
 
-**There is no classification or inspection step today.** The duty manager's
-report text is passed to the routing agent, and therefore to the `global`
-endpoint, uninspected. A boundary that decides what may cross is the intended
-design and is **PLANNED, NOT INTEGRATED** — see
-[`ARCHITECTURE.md`](ARCHITECTURE.md). What does hold is narrower: untrusted
-text is recorded as `UNTRUSTED_INPUT` and can never satisfy a policy
-condition, which protects the *authorization* path and nothing more.
+**Untrusted report text is screened by Model Armor before the routing model
+reads it** — see [`gate-g`](docs/evidence/gate-g-model-armor-security.md). That
+is a filter, not the boundary, and Gate G documents a live prompt it did not
+flag. The guarantee that actually holds is narrower and structural: untrusted
+text is recorded as `UNTRUSTED_INPUT` and can never satisfy a policy condition,
+which protects the *authorization* path and nothing more. Report text still
+reaches the `global` inference endpoint.
 
 Pub/Sub is deliberately excluded. Replay and duplicate-delivery proof is done
 by repeated delivery against Firestore-backed deterministic idempotency.

@@ -1,12 +1,20 @@
 from __future__ import annotations
 
+import base64
 import os
 from functools import lru_cache
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import FastAPI, Header, HTTPException
 from fastapi.concurrency import run_in_threadpool
-from pydantic import BaseModel, ConfigDict, Field, StrictBool, ValidationError
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StrictBool,
+    ValidationError,
+    model_validator,
+)
 
 from scf import config
 from scf.app.invoke import WorkerResponseTooLarge, call_service
@@ -76,6 +84,24 @@ class IncidentIntake(BaseModel):
     description: str = Field(min_length=10, max_length=4000)
     site_id: str = Field(default="MEL-WAREHOUSE-01", min_length=3, max_length=64)
     reported_by: str = Field(default="duty-manager", max_length=64)
+    #: An optional screenshot, base64 encoded. Untrusted for the same reason the
+    #: description is untrusted, and constrained the same way: what the model may
+    #: emit after looking at it is a set of specialists from a closed enum and a
+    #: transcription. A picture cannot authorize anything.
+    image_base64: str | None = Field(default=None, max_length=3_000_000)
+    image_media_type: Literal["image/png", "image/jpeg", "image/webp"] | None = None
+
+    @model_validator(mode="after")
+    def _image_is_complete(self) -> "IncidentIntake":
+        if bool(self.image_base64) != bool(self.image_media_type):
+            raise ValueError("an image needs both its bytes and its media type")
+        return self
+
+    def decoded_image(self) -> tuple[bytes, str] | None:
+        """The screenshot as bytes, or None. Raises on anything undecodable."""
+        if not self.image_base64 or not self.image_media_type:
+            return None
+        return base64.b64decode(self.image_base64, validate=True), self.image_media_type
 
 
 class RouteOut(BaseModel):
@@ -92,6 +118,15 @@ class IncidentCreated(BaseModel):
     routes: list[RouteOut]
     remediation: dict[str, Any] = {}
     trace_id: str | None = None
+    #: What the model transcribed from an attached screenshot. Surfaced so a
+    #: manager can see what the system read in their picture — and so a judge
+    #: can see that a screenshot changed the routing. Untrusted throughout: it
+    #: is displayed, never acted on.
+    observed_text: str = ""
+    image_attached: bool = False
+    #: Whether Model Armor was consulted and what it said. Present on every
+    #: response, including blocked ones, so the UI never has to infer it.
+    screening: dict[str, Any] = {}
 
 
 # Not /healthz: Google Frontend intercepts that exact path ahead of the
@@ -164,6 +199,25 @@ async def create_incident(
     # than a defence against it. Every event below carries the incident id, so
     # the ordering is reconstructable from logs: a blocked incident has a
     # MODEL_ARMOR_BLOCKED and no adk_invocation_started at all.
+    try:
+        attached_image = intake.decoded_image()
+    except Exception:  # noqa: BLE001 - undecodable bytes are not a picture
+        attached_image = None
+        log_event(
+            "attached_image_undecodable",
+            severity="WARNING",
+            trace_id=trace_id,
+            incident_id=incident_id,
+        )
+    if attached_image is not None:
+        log_event(
+            "attached_image_accepted",
+            trace_id=trace_id,
+            incident_id=incident_id,
+            media_type=attached_image[1],
+            bytes=len(attached_image[0]),
+        )
+
     log_event(
         "model_armor_screen_started",
         trace_id=trace_id,
@@ -226,6 +280,10 @@ async def create_incident(
             routes=[],
             remediation=failed,
             trace_id=trace_id,
+            image_attached=attached_image is not None,
+            # Screening never completed, so there is no verdict to report.
+            # An empty object says that; `screening` is unbound on this path.
+            screening={},
         )
 
     if not screening.allowed:
@@ -256,6 +314,8 @@ async def create_incident(
             routes=[],
             remediation=blocked,
             trace_id=trace_id,
+            image_attached=attached_image is not None,
+            screening=screening.as_log_fields(),
         )
 
     log_event("model_armor_allowed", trace_id=trace_id, incident_id=incident_id,
@@ -263,7 +323,7 @@ async def create_incident(
     log_event("adk_invocation_started", trace_id=trace_id, incident_id=incident_id,
               model=config.VERIFIED_MODEL_ID, model_location=config.MODEL_LOCATION)
     try:
-        decision = await route_incident(intake.description)
+        decision = await route_incident(intake.description, image=attached_image)
     except Exception as exc:  # noqa: BLE001 - categorised, never re-raised raw
         # The incident is already persisted, so failing the HTTP call here would
         # strand it at INTAKE with nobody told and nothing to reconcile. It is
@@ -295,7 +355,81 @@ async def create_incident(
             routes=[],
             remediation=failed,
             trace_id=trace_id,
+            image_attached=attached_image is not None,
+            screening=screening.as_log_fields(),
         )
+
+    # Model Armor screens the typed report before any model reads it. A
+    # screenshot cannot work that way — something has to look at the picture
+    # before there is any text to screen. So the transcription the routing model
+    # produces is screened here, after the fact, and a hit still stops the
+    # incident: routing alone has mutated nothing, and the decision is discarded
+    # rather than acted on.
+    #
+    # This is narrower than the text path and is documented as such. It catches
+    # hostile instructions the model transcribed faithfully. It cannot catch
+    # what the model declined to transcribe, and it is not the reason a
+    # screenshot is safe — that reason is structural: the only thing the model
+    # may emit after looking at an image is a set of specialists from a closed
+    # enum, so image content can never become TRUSTED_TOOL evidence or an action.
+    if attached_image is not None and decision.observed_text.strip():
+        try:
+            image_screening = await run_in_threadpool(
+                screen_untrusted_text, decision.observed_text
+            )
+        except Exception as unavailable:  # noqa: BLE001 - fail closed, as above
+            image_screening = None
+            log_event(
+                "image_text_screening_unavailable",
+                severity="ERROR",
+                trace_id=trace_id,
+                incident_id=incident_id,
+                error_type=type(unavailable).__name__,
+            )
+        if image_screening is None or image_screening.blocked:
+            triggered = (
+                list(image_screening.triggered_filters) if image_screening else []
+            )
+            log_event(
+                "model_armor_blocked_image_text",
+                severity="WARNING",
+                trace_id=trace_id,
+                incident_id=incident_id,
+                triggered_filters=triggered,
+            )
+            category = (
+                FailureCategory.UNTRUSTED_CONTENT_BLOCKED
+                if image_screening is not None
+                else FailureCategory.SECURITY_SCREENING_UNAVAILABLE
+            )
+            blocked_image = await _fail(
+                repo,
+                incident_id,
+                WorkflowFailure(
+                    category,
+                    "screening refused text read from the attached screenshot",
+                    triggered_filters=triggered,
+                ),
+                trace_id,
+                {"attempted": True, "specialists_attempted": []},
+            )
+            final = await run_in_threadpool(repo.get, incident_id)
+            return IncidentCreated(
+                incident_id=incident_id,
+                status=final["status"],
+                summary=blocked_image["escalation"]["impact"],
+                required_specialists=[],
+                routes=[],
+                remediation=blocked_image,
+                trace_id=trace_id,
+                observed_text=decision.observed_text,
+                image_attached=True,
+                screening=(
+                    image_screening.as_log_fields() if image_screening else {}
+                ),
+            )
+
+    observed_from_image = decision.observed_text if attached_image else ""
 
     # The model proposes a specialist set; the governed catalog decides which of
     # those may actually be routed to. A specialist that is disabled or has no
@@ -346,6 +480,9 @@ async def create_incident(
         ],
         remediation=remediation,
         trace_id=trace_id,
+        observed_text=observed_from_image,
+        image_attached=attached_image is not None,
+        screening=screening.as_log_fields(),
     )
 
 

@@ -25,27 +25,51 @@ competent to make.
 
 ## H1 / H2 — the fleet as deployed
 
-| Role | Service | Identity | LLM | May propose | May write Firestore |
+| Role | Service | Identity | Model-driven | May propose | May write Firestore |
 |---|---|---|---|---|---|
-| Orchestrator | `scf-orchestrator` | `sa-orchestrator` | yes | — | yes (sole agent-side writer) |
-| Systems Investigator | `scf-agent-systems` | `sa-agent-systems` | yes | **yes** | no |
-| Network Investigator | `scf-agent-network` | `sa-agent-network` | yes | no | no |
-| Security Investigator | `scf-agent-security` | `sa-agent-security` | yes | no | no |
-| Continuity Coordinator | `scf-agent-continuity` | `sa-agent-continuity` | **no** | no | no |
+| Orchestrator | `scf-orchestrator` | `sa-orchestrator` | **yes** — Gemini via ADK | — | yes (sole agent-side writer) |
+| Systems Investigator | `scf-agent-systems` | `sa-agent-systems` | no | **yes** | no |
+| Network Investigator | `scf-agent-network` | `sa-agent-network` | no | no | no |
+| Security & Identity Investigator | `scf-agent-security` | `sa-agent-security` | no | no | no |
+| Continuity Coordinator | `scf-agent-continuity` | `sa-agent-continuity` | no | no | no |
 | Remediation Executor | `scf-executor` | `sa-executor` | no | no | yes (execution plane) |
 | Verifier | `scf-verifier` | `sa-verifier` | no | no | no |
 | Human approval | `scf-approval` | `sa-approval` | no | no | yes (approvals only) |
 
+**Exactly one component calls a model.** `src/scf/agents/routing.py` is the only
+place in the repository that reaches Gemini, and the orchestrator is the only
+service that runs it. Everything else is deterministic code:
+
+* **Network Investigator** — a read-only evidence service. It resolves DNS,
+  opens a TCP connection and completes a TLS handshake, and returns typed
+  findings with timings. No model.
+* **Security & Identity Investigator** — a read-only evidence service. It reads
+  the live Cloud Run IAM policy and ingress setting and returns typed findings.
+  No model.
+* **Continuity Coordinator** — deterministic manager-facing narrative assembled
+  from incident state by ordinary code. No model.
+* **Systems Investigator** — gathers Cloud Run evidence and derives a proposal
+  from that evidence with `propose_remediation`, a pure function over trusted
+  findings. The proposal is inert until the policy gate rules on it. No model.
+* **Orchestrator** — model-driven. Gemini decides which specialists to consult,
+  constrained to a closed enum and a typed contract, and that is the whole of
+  what the model is trusted to do.
+
+This is deliberate, and it is why the routing matrix below is the interesting
+part: the *only* non-deterministic step in the system is which specialists get
+asked. Everything after that — evidence, policy, execution, verification — is
+code that behaves the same way every time.
+
 Four distinct specialist identities. Sharing one would mean sharing authority.
 
-The Continuity Coordinator calls no model at all. Every sentence a duty manager
-reads is assembled from incident state by ordinary code — deliberate, because the
-person reading it is making a decision about their site and the text should be
-derivable from the record rather than generated fresh each time.
+Every sentence a duty manager reads is assembled from incident state by ordinary
+code — deliberate, because the person reading it is making a decision about their
+site and the text should be derivable from the record rather than generated fresh
+each time.
 
 ---
 
-## H5 — an agent withdrawn by the registry
+## H5 — an agent withdrawn by the governed runtime catalog
 
 `enabled: false` on `network` in `agent_registry.json`. No code changed. The
 catalog ships inside the image, so applying it took a redeploy — what it did not
@@ -67,7 +91,7 @@ generation  unchanged
 The model asked for exactly one specialist and got none. Nothing was consulted,
 nothing was delegated, nothing was changed, and the incident went to a person.
 
-**Registry governance is discovery-only.** It decides who may be *asked*. It
+**Catalog governance is discovery-only.** It decides who may be *asked*. It
 cannot authorize an action — `is_selectable` and `may_establish` are absent from
 `policy/engine.py` entirely, and a test pins that.
 
