@@ -156,7 +156,7 @@ platform failure to cite.
 | Aug 21 | Failure engineering (Gate E) | **VERIFIED** |
 | Aug 22 | Durability / HITL (Gate F) | **VERIFIED** |
 | Aug 23 | Security / Model Armor (Gate G) | **VERIFIED** |
-| Aug 24 | Fleet completion (Gate H) | **IN PROGRESS** |
+| Aug 24 | Fleet completion (Gate H) | **IN PROGRESS** — H0-H4, H7-H9 done; H5, H6, H10-H13 remain |
 | Aug 25 | Agent registry / lifecycle | NOT STARTED |
 | Aug 26 | Evaluation | NOT STARTED |
 | Aug 27 | Reliability | NOT STARTED |
@@ -413,25 +413,36 @@ Aug 31 is submission, link and access buffer **only**. No feature development.
 
 | Field | Value |
 |---|---|
-| Latest commit | see the tail of `git log --oneline` |
-| Offline tests | 542 collected (531 passed, 11 skipped) |
-| Current gate | Gate G closed |
-| Gate E status | **VERIFIED**; external Codex catch-up audit pending on quota |
-| Gate F status | **VERIFIED**; same Codex catch-up audit pending |
-| Next gate | Aug 24 — Fleet completion. **Not started.** |
+| Latest commit | `06264ea` — approval moved to its own service |
+| Offline tests | 589 collected (578 passed, 11 skipped) |
+| Current gate | Gate H **IN PROGRESS**; Codex catch-up High 1 and High 2 both closed |
+| Gate E status | **VERIFIED**; Codex catch-up findings fixed |
+| Gate F status | **VERIFIED**; approval identity corrected by Codex High 2 |
+| Gate G status | **VERIFIED** (Model Armor live, including a documented miss) |
+| Codex High 1 | **CLOSED** — any screening failure fails closed without a 500 |
+| Codex High 2 | **CLOSED** — approval lives on `scf-approval`; IAM is the gate |
+| Next | Resume Gate H: H5, H6, H10, H11, H12, H13. **Do not start the UI gate.** |
 | Public repo | https://github.com/aish2897/after-hours-site-continuity-fleet |
 
 Deployed Cloud Run revisions (Sydney):
 
 | Service | Revision |
 |---|---|
-| `scf-orchestrator` | `scf-orchestrator-00136-ck2` |
+| `scf-orchestrator` | `scf-orchestrator-00166-gd9` |
 | `scf-agent-systems` | `scf-agent-systems-00117-ffl` |
+| `scf-agent-network` | `scf-agent-network-00001-dh7` |
+| `scf-agent-security` | `scf-agent-security-00001-2d4` |
+| `scf-agent-continuity` | `scf-agent-continuity-00001-mng` |
+| `scf-approval` (human surface) | `scf-approval-00002-5hm` |
 | `scf-executor` | `scf-executor-00117-pjn` |
 | `scf-verifier` | `scf-verifier-00039-jfm` |
 | `dispatch-web` (target) | `dispatch-web-00004-jqm` |
 | `site-directory` (blast-radius control) | `site-directory-00001-hzn` |
 
+`roles/run.invoker` on `scf-approval` is held by one human principal and by no
+service account. That is the approval boundary; the application does not
+separately verify which human approved, and says so.
+
 Custom IAM roles: `scfRemediator`, `scfDecisionReader`, `scfExecutionWriter`,
-`scfArtifactReader`. Firestore databases: `(default)` and `execution-state`,
-both `australia-southeast1`.
+`scfArtifactReader`, `scfPromptScreener`. Firestore databases: `(default)` and
+`execution-state`, both `australia-southeast1`.
