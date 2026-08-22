@@ -177,17 +177,70 @@ def test_a_role_with_no_bindings_grants_nobody(monkeypatch):
         main._authorize_approver("Bearer real", "incident_commander")
 
 
-def test_spoofed_identity_headers_cannot_name_the_approver():
-    """The principal comes from a Google-signed token, not from a header."""
+def test_the_orchestrator_no_longer_hosts_an_approval_door():
+    """Approval decisions live on a service no agent can invoke."""
     import inspect
 
-    source = inspect.getsource(main._verified_caller)
-    assert "verify_oauth2_token" in source
-    assert "X-Goog" not in source
-    for endpoint in (main.approve, main.reject):
-        signature = inspect.signature(endpoint)
-        assert "x_goog_authenticated_user_email" not in signature.parameters
-        assert "authorization" in signature.parameters
+    source = inspect.getsource(main)
+    assert '/approvals/{approval_id}/approve"' not in source
+    assert '/approvals/{approval_id}/reject"' not in source
+    # Reading one stays: reading authorizes nothing.
+    assert '@app.get("/approvals/{approval_id}")' in source
+
+
+def test_the_approval_surface_never_trusts_a_plain_header():
+    """Only a signed IAP assertion may name a person."""
+    import inspect
+
+    from scf.app import approval
+
+    source = inspect.getsource(approval.verified_iap_principal)
+    assert "verify_token" in source
+    assert "certs_url" in source
+    assert "cloud.google.com/iap" in source
+    # The unsigned convenience header is never READ anywhere in the service.
+    # Checked against code, not prose: the module docstring names the header in
+    # order to say it is not trusted.
+    import ast
+
+    tree = ast.parse(inspect.getsource(approval))
+    for node in ast.walk(tree):
+        if isinstance(
+            node, (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
+        ) and ast.get_docstring(node):
+            node.body = node.body[1:]
+    code = ast.unparse(tree)
+    assert "x_goog_authenticated_user_email" not in code
+    assert "X-Goog-Authenticated-User-Email" not in code
+
+
+def test_without_iap_the_record_names_the_authority_not_a_person(monkeypatch):
+    from scf.app import approval
+
+    monkeypatch.setattr(approval, "APPROVER_ROLE_BINDINGS",
+                        {"incident_commander": frozenset({"boss@example.test"})})
+    principal, authority = approval.authorize(None, "incident_commander")
+    assert authority == "PLATFORM_IAM"
+    assert "PLATFORM_IAM" in principal
+    assert "@" not in principal.split("(")[0]
+    assert "boss@example.test" not in principal
+
+
+def test_a_verified_iap_principal_must_still_be_bound_to_the_role(monkeypatch):
+    from fastapi import HTTPException
+
+    from scf.app import approval
+
+    monkeypatch.setattr(approval, "APPROVER_ROLE_BINDINGS",
+                        {"incident_commander": frozenset({"boss@example.test"})})
+    monkeypatch.setattr(approval, "verified_iap_principal", lambda _a: "boss@example.test")
+    assert approval.authorize("signed", "incident_commander") == (
+        "boss@example.test", "IAP_VERIFIED_IDENTITY"
+    )
+    monkeypatch.setattr(approval, "verified_iap_principal", lambda _a: "intruder@example.test")
+    with pytest.raises(HTTPException) as refused:
+        approval.authorize("signed", "incident_commander")
+    assert refused.value.status_code == 403
 
 
 def test_bindings_parse_exactly_and_never_wildcard(monkeypatch):

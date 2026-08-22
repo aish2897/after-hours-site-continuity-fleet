@@ -896,7 +896,7 @@ def test_evidence_test_count_matches_the_actual_suite(request):
     # Update this to the NEWEST gate artifact each time a gate closes. Earlier
     # artifacts keep the total as it stood at their own gate — rewriting them
     # would be editing history to match today.
-    evidence = (root / "docs/evidence/gate-g-model-armor-security.md").read_text(
+    evidence = (root / "docs/evidence/codex-high-2-approval-authorization.md").read_text(
         encoding="utf-8"
     )
     claimed = re.search(r"\*\*Offline: (\d+) passed, (\d+) skipped\*\*", evidence)

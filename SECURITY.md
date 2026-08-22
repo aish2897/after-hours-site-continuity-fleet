@@ -26,6 +26,39 @@ Proven by `tests/policy/test_decision_matrix.py`:
 - `test_untrusted_evidence_cannot_revoke_trusted_authorization`
 - `test_evidence_snapshot_hash_ignores_untrusted_noise`
 
+## Who may approve
+
+Approval is not an endpoint on the orchestrator. It is a separate Cloud Run
+service, `scf-approval`, and `roles/run.invoker` on it is held by one human
+principal. No service account in the fleet holds it.
+
+That matters because it moves the rule out of this repository. "An autonomous
+identity cannot approve an autonomous decision" is not enforced by an `if`
+statement that a future refactor could weaken — it is enforced by Google Cloud
+IAM at the service boundary, before any code here runs. Proven live against all
+six fleet identities, an unauthenticated caller, and a caller supplying forged
+`X-Goog-Authenticated-User-Email` and `X-Goog-IAP-JWT-Assertion` headers: every
+one refused.
+
+**What is not claimed.** Cloud Run does not forward a caller token the container
+can verify, and IAP is not in front of this service — creating an OAuth brand
+requires deprecated tooling. So the application does **not** independently
+establish which human approved. It records the authority that actually applied:
+
+```
+approver_principal: "PLATFORM_IAM (role incident_commander, service scf-approval)"
+```
+
+Rather than inventing an email for the audit chain, which is what the code
+previously did.
+
+`required_approval_role` is recorded on every approval and is enforced against
+configured bindings on the IAP path, which is implemented and unit-tested. On the
+live IAM-only deployment it is recorded but is not a second, independent check.
+
+Details and the full matrix:
+[`docs/evidence/codex-high-2-approval-authorization.md`](docs/evidence/codex-high-2-approval-authorization.md).
+
 ## What the LLM may and may not do
 
 Gemini may interpret reports, choose which specialists to invoke and say why,

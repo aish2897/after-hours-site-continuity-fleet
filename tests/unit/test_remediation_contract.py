@@ -189,9 +189,11 @@ def test_the_only_self_issued_403_is_the_approval_refusal():
         for n, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
             if forbidden.search(line):
                 sites.append(f"{path.name}:{n}")
-    # Two: the approve and reject endpoints, which are one decision expressed
-    # at two doors. Every one must name itself.
-    assert len(sites) == 2, f"unexpected self-issued 403s: {sites}"
+    # One: `approval.authorize()`. Approve and reject share it, so the refusal
+    # is a single decision at a single place rather than two copies that could
+    # drift apart. It must name itself.
+    assert len(sites) == 1, f"unexpected self-issued 403s: {sites}"
+    assert sites[0].startswith("approval.py"), sites
     for path in SRC.rglob("*.py"):
         for line in path.read_text(encoding="utf-8").splitlines():
             if "status_code=403" in line:

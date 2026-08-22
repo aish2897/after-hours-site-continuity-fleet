@@ -94,6 +94,8 @@ capability beyond the state recorded here.
 | Executor independently verifies human approval | **`VERIFIED`** | [`gate-f`](docs/evidence/gate-f-durable-approval-resume.md) |
 | Resume from Firestore by a process that never saw the incident | **`VERIFIED`** | [`gate-f`](docs/evidence/gate-f-durable-approval-resume.md) |
 | Resumable human approval | **`VERIFIED`** | [`gate-f`](docs/evidence/gate-f-durable-approval-resume.md) |
+| Approval lives on a service no fleet identity can invoke | **`VERIFIED`** | [`high-2`](docs/evidence/codex-high-2-approval-authorization.md) — six service accounts, unauthenticated, and spoofed identity headers all refused |
+| Approver identity independently verified by the application | `NOT INTEGRATED` | IAP is not in front of `scf-approval`; the gate is Cloud Run IAM and the record says `PLATFORM_IAM`, not a person. IAP verification is implemented and unit-tested but not live — see [`high-2`](docs/evidence/codex-high-2-approval-authorization.md) |
 | Ambiguous mutation outcome kept reconcilable (only 409 proves refusal) | `IMPLEMENTED` | `tests/unit/test_failure_engineering.py` · `tests/unit/test_lease_fencing.py` — no live non-409 failure has been produced by Google, so this is not claimed as verified |
 | Closed incident cannot be re-executed | **`VERIFIED`** | [`gate-d3`](docs/evidence/gate-d3-lease-fencing-cas.md) |
 | Reconciliation after an unreachable executor | **`VERIFIED`** | [`gate-d3`](docs/evidence/gate-d3-lease-fencing-cas.md) |

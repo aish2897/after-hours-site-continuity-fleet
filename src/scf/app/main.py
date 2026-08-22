@@ -2102,72 +2102,12 @@ async def _close_unapproved_incident(
         )
 
 
-@app.post("/approvals/{approval_id}/approve")
-async def approve(
-    approval_id: str,
-    request: ApprovalDecisionRequest | None = None,
-    authorization: str | None = Header(default=None),
-    x_cloud_trace_context: str | None = Header(default=None),
-) -> dict[str, Any]:
-    """A person authorizes one pinned decision. Idempotent."""
-    trace_id = trace_id_from_header(x_cloud_trace_context)
-    try:
-        approval = await run_in_threadpool(repository().get_approval, approval_id)
-    except ApprovalNotFound as missing:
-        raise HTTPException(status_code=404, detail="approval_not_found") from missing
-    try:
-        approver = _authorize_approver(
-            authorization, approval.get("required_approval_role")
-        )
-    except ApprovalForbidden as refused:
-        log_event(
-            "approval_forbidden",
-            severity="WARNING",
-            trace_id=trace_id,
-            approval_id=approval_id,
-            incident_id=approval.get("incident_id"),
-            required_approval_role=approval.get("required_approval_role"),
-            detail=str(refused),
-        )
-        raise HTTPException(status_code=403, detail="approver_not_authorized") from refused
-    return await _record_approval_decision(
-        approval_id, state="APPROVED", trace_id=trace_id, approver=approver
-    )
-
-
-@app.post("/approvals/{approval_id}/reject")
-async def reject(
-    approval_id: str,
-    request: ApprovalDecisionRequest | None = None,
-    authorization: str | None = Header(default=None),
-    x_cloud_trace_context: str | None = Header(default=None),
-) -> dict[str, Any]:
-    """A person refuses. Nothing is mutated, now or later, under this approval."""
-    trace_id = trace_id_from_header(x_cloud_trace_context)
-    try:
-        approval = await run_in_threadpool(repository().get_approval, approval_id)
-    except ApprovalNotFound as missing:
-        raise HTTPException(status_code=404, detail="approval_not_found") from missing
-    try:
-        approver = _authorize_approver(
-            authorization, approval.get("required_approval_role")
-        )
-    except ApprovalForbidden as refused:
-        log_event(
-            "approval_forbidden",
-            severity="WARNING",
-            trace_id=trace_id,
-            approval_id=approval_id,
-            incident_id=approval.get("incident_id"),
-            required_approval_role=approval.get("required_approval_role"),
-            detail=str(refused),
-        )
-        raise HTTPException(status_code=403, detail="approver_not_authorized") from refused
-    return await _record_approval_decision(
-        approval_id, state="REJECTED", trace_id=trace_id, approver=approver
-    )
-
-
+#: Approval DECISIONS live on `scf-approval`, a separate Cloud Run service whose
+#: `run.invoker` is held by the human approver alone — no fleet identity has it.
+#: The two write endpoints used to sit here, on the service every agent can
+#: reach; moving them makes "an autonomous identity cannot approve an autonomous
+#: decision" a property of Google Cloud IAM rather than of this code. Reading an
+#: approval stays here, because reading authorizes nothing.
 @app.get("/approvals/{approval_id}")
 async def read_approval(approval_id: str) -> dict[str, Any]:
     """Read the durable approval. Proves it outlives the process that made it."""

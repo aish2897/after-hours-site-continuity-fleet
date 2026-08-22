@@ -19,6 +19,8 @@ elif SCF_ROLE == "security":
     from scf.app.specialists import security_app as app
 elif SCF_ROLE == "continuity":
     from scf.app.continuity import app
+elif SCF_ROLE == "approval":
+    from scf.app.approval import app
 elif SCF_ROLE == "executor":
     from scf.app.executor import app
 elif SCF_ROLE == "verifier":
