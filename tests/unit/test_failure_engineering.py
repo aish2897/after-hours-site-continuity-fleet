@@ -187,8 +187,10 @@ def test_invalid_model_output_escalates_and_never_executes():
     from scf.app import main
 
     source = inspect.getsource(main.create_incident)
-    # The failure is categorised before any specialist or executor is reached.
-    assert source.index("MODEL_OUTPUT_INVALID") < source.index("_autonomous_remediation")
+    # The failure is categorised before ANY specialist is reached. The fleet
+    # dispatch is now `_run_fleet`, which is what reaches the investigators and
+    # (only through Systems) the executor.
+    assert source.index("MODEL_OUTPUT_INVALID") < source.index("_run_fleet")
 
 
 def test_a_failed_routing_does_not_strand_the_incident():

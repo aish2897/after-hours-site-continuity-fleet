@@ -40,12 +40,15 @@ from scf.domain.models import (
     Proposal,
 )
 from scf.obs import log_event, trace_id_from_header
-from scf.policy import evaluate, trusted_evidence_map
+from scf.policy import default_registry, evaluate, trusted_evidence_map
 from scf.security import ScreeningUnavailable, screen_untrusted_text
 from scf.state import IncidentNotFound, IncidentRepository
 from scf.state.firestore_repo import ApprovalNotFound
 
 INVESTIGATOR_URL = os.environ.get("SCF_INVESTIGATOR_URL", "")
+NETWORK_URL = os.environ.get("SCF_NETWORK_URL", "")
+SECURITY_URL = os.environ.get("SCF_SECURITY_URL", "")
+CONTINUITY_URL = os.environ.get("SCF_CONTINUITY_URL", "")
 EXECUTOR_URL = os.environ.get("SCF_EXECUTOR_URL", "")
 VERIFIER_URL = os.environ.get("SCF_VERIFIER_URL", "")
 
@@ -289,12 +292,30 @@ async def create_incident(
             trace_id=trace_id,
         )
 
-    required = [s.value for s in decision.required_specialists()]
+    # The model proposes a specialist set; the governed catalog decides which of
+    # those may actually be routed to. A specialist that is disabled or has no
+    # deployed runtime is dropped here, whatever the model asked for — and the
+    # drop is recorded rather than silently applied.
+    registry = default_registry()
+    proposed = [s.value for s in decision.required_specialists()]
+    required = [name for name in proposed if registry.is_selectable(name)]
+    withheld = [name for name in proposed if name not in required]
+    if withheld:
+        log_event(
+            "specialists_withheld_by_registry",
+            severity="WARNING",
+            trace_id=trace_id,
+            incident_id=incident_id,
+            withheld=withheld,
+            selectable=registry.selectable_specialists(),
+        )
     log_event(
         "routing_decision",
         trace_id=trace_id,
         incident_id=incident_id,
         required_specialists=required,
+        proposed_specialists=proposed,
+        withheld_specialists=withheld,
         model_id=decision.model_id,
     )
 
@@ -303,15 +324,9 @@ async def create_incident(
         repo.transition, incident_id, IncidentStatus.INVESTIGATING, trace_id=trace_id
     )
 
-    remediation: dict[str, Any] = {"attempted": False, "reason": "systems_not_routed"}
-    if SpecialistName.SYSTEMS in decision.required_specialists():
-        remediation = await _autonomous_remediation(
-            repo, incident_id, trace_id, x_cloud_trace_context
-        )
-    else:
-        await run_in_threadpool(
-            repo.transition, incident_id, IncidentStatus.ESCALATED, trace_id=trace_id
-        )
+    remediation = await _run_fleet(
+        repo, incident_id, required, withheld, trace_id, x_cloud_trace_context
+    )
 
     final = await run_in_threadpool(repo.get, incident_id)
 
@@ -2337,3 +2352,186 @@ async def _execute_approved_decision(
             trace_id,
             outcome,
         )
+
+
+# --- the fleet ---------------------------------------------------------------
+
+
+#: Read-only specialists the orchestrator can consult for evidence. Systems is
+#: absent on purpose: it is the only one that may propose a remediation, so it
+#: runs through the full authorization pipeline rather than this helper.
+EVIDENCE_SPECIALISTS: dict[str, str] = {
+    "network": NETWORK_URL,
+    "security": SECURITY_URL,
+}
+
+
+async def _consult(
+    specialist: str,
+    incident_id: str,
+    trace_id: str | None,
+    trace_header: str | None,
+) -> list[Evidence]:
+    """Ask one read-only specialist for evidence. Failure is never fatal here.
+
+    A specialist that cannot be reached costs the orchestrator information, not
+    the incident: the others still ran, and the deterministic gate will simply
+    find the evidence insufficient rather than acting on a guess.
+    """
+    url = EVIDENCE_SPECIALISTS.get(specialist, "")
+    if not url:
+        return []
+    try:
+        body = await _call(
+            url,
+            "/evidence",
+            {
+                "incident_id": incident_id,
+                "service": config.DISPATCH_WEB_SERVICE,
+                "target_url": config.dispatch_web_url(),
+            },
+            service=specialist,
+            trace_header=trace_header,
+        )
+        return [Evidence.model_validate(item) for item in (body.get("evidence") or [])]
+    except (DownstreamFailure, ValidationError, KeyError, TypeError) as exc:
+        log_event(
+            "specialist_unavailable",
+            severity="WARNING",
+            trace_id=trace_id,
+            incident_id=incident_id,
+            specialist=specialist,
+            error_type=type(exc).__name__,
+        )
+        return []
+
+
+async def _compose_manager_status(
+    incident_id: str,
+    consulted: list[str],
+    facts: dict[str, Any],
+    outcome: dict[str, Any],
+    trace_id: str | None,
+    trace_header: str | None,
+) -> dict[str, Any] | None:
+    """Ask the Continuity Coordinator what to tell the duty manager."""
+    if not CONTINUITY_URL:
+        return None
+    try:
+        return await _call(
+            CONTINUITY_URL,
+            "/status",
+            {
+                "incident_id": incident_id,
+                "status": str(outcome.get("final_status") or ""),
+                "specialists_consulted": consulted,
+                "network_reachable": facts.get("network_reachable"),
+                "service_responding": (
+                    None
+                    if facts.get("service_unhealthy") is None
+                    else not facts["service_unhealthy"]
+                ),
+                "identity_posture_sound": facts.get("identity_posture_sound"),
+                "remediation_state": str(outcome.get("final_status") or ""),
+                "awaiting_human": bool(outcome.get("approval")),
+                "changed_anything": outcome.get("mutated_infrastructure"),
+            },
+            service="continuity",
+            trace_header=trace_header,
+        )
+    except DownstreamFailure as failure:
+        log_event(
+            "continuity_unavailable",
+            severity="WARNING",
+            trace_id=trace_id,
+            incident_id=incident_id,
+            kind=failure.kind,
+        )
+        return None
+
+
+async def _run_fleet(
+    repo: IncidentRepository,
+    incident_id: str,
+    required: list[str],
+    withheld: list[str],
+    trace_id: str | None,
+    trace_header: str | None,
+) -> dict[str, Any]:
+    """Consult the routed specialists, then act only if Systems warrants it.
+
+    Selective by construction: this consults exactly the specialists routing
+    asked for and the catalog permits. There is no fan-out branch — a request
+    that routes to Network alone never touches Systems or Security.
+
+    Secondary delegation lives here too. If Network reports the site reachable
+    while the application is not responding, the problem is not the network, and
+    Systems is brought in on the strength of that trusted evidence rather than
+    on anything the report said.
+    """
+    consulted: list[str] = []
+    fleet_evidence: list[Evidence] = []
+
+    for specialist in [s for s in required if s in EVIDENCE_SPECIALISTS]:
+        collected = await _consult(specialist, incident_id, trace_id, trace_header)
+        if collected:
+            consulted.append(specialist)
+            fleet_evidence.extend(collected)
+            await run_in_threadpool(
+                repo.save_evidence, incident_id, collected, trace_id=trace_id
+            )
+
+    facts = trusted_evidence_map(fleet_evidence)
+    escalate_reason = "no_specialist_routed"
+    run_systems = "systems" in required
+
+    if not run_systems and facts.get("network_reachable") is True:
+        # Evidence-dependent delegation: the network is fine, so whatever the
+        # manager is seeing is above it. That conclusion comes from a trusted
+        # tool call, not from re-reading the report.
+        if default_registry().is_selectable("systems"):
+            run_systems = True
+            escalate_reason = "delegated_after_network_evidence"
+            log_event(
+                "secondary_delegation",
+                trace_id=trace_id,
+                incident_id=incident_id,
+                because="network_reachable",
+                delegated_to="systems",
+                after=consulted,
+            )
+
+    if run_systems:
+        outcome = await _autonomous_remediation(
+            repo, incident_id, trace_id, trace_header
+        )
+        if "systems" not in consulted:
+            consulted.append("systems")
+        if escalate_reason == "delegated_after_network_evidence":
+            outcome["secondary_delegation"] = {
+                "because": "network_reachable",
+                "after": [s for s in consulted if s != "systems"],
+                "delegated_to": "systems",
+            }
+    else:
+        # Nothing here can safely change infrastructure: only Systems produces a
+        # proposal, and it was not routed. The incident goes to a person.
+        await run_in_threadpool(
+            repo.transition, incident_id, IncidentStatus.ESCALATED, trace_id=trace_id
+        )
+        outcome = {
+            "attempted": False,
+            "reason": escalate_reason,
+            "final_status": IncidentStatus.ESCALATED.value,
+        }
+
+    outcome["specialists_consulted"] = consulted
+    if withheld:
+        outcome["specialists_withheld_by_registry"] = withheld
+
+    status = await _compose_manager_status(
+        incident_id, consulted, facts, outcome, trace_id, trace_header
+    )
+    if status:
+        outcome["manager_status"] = status
+    return outcome

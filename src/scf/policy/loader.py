@@ -77,12 +77,32 @@ class AgentEntry(Frozen):
     #: "does not exist". The registry claims to describe the runtime, so it has
     #: to be able to say when there isn't one.
     deployed: bool = False
+    #: Lifecycle switch. A deployed agent can still be withdrawn from service —
+    #: deprecated, under investigation, or simply not approved for use — and the
+    #: orchestrator must respect that without a redeploy.
+    enabled: bool = True
 
 
 class AgentRegistry(Frozen):
     registry_version: str
     agents: dict[str, AgentEntry]
     description: str = ""
+
+    def is_selectable(self, agent_name: str) -> bool:
+        """May the orchestrator route work to this agent right now?
+
+        Governance, not authorization. A specialist that is disabled, or has no
+        deployed runtime, must not be selected — and the answer comes from the
+        governed catalog rather than from whatever the model proposed. This
+        controls DISCOVERY only: it can never permit an infrastructure change,
+        which still requires trusted evidence, the deterministic gate, an exact
+        pinned authorization and a scoped identity.
+        """
+        entry = self.agents.get(agent_name)
+        return bool(entry and entry.deployed and entry.enabled)
+
+    def selectable_specialists(self) -> list[str]:
+        return sorted(name for name in self.agents if self.is_selectable(name))
 
     def may_propose(self, agent_name: str) -> bool:
         entry = self.agents.get(agent_name)

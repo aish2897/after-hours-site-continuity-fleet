@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+
 from typing import Final
 
 PROJECT_ID: Final[str] = "site-continuity-fleet"
@@ -89,6 +91,17 @@ def validate_database_config() -> None:
 
 # --- Targets -----------------------------------------------------------------
 DISPATCH_WEB_SERVICE: Final[str] = "dispatch-web"
+
+#: Where the Network Investigator probes. Supplied by configuration and never by
+#: a duty manager: untrusted text must not be able to choose what an agent of
+#: this fleet reaches out to.
+DISPATCH_WEB_URL: Final[str] = os.environ.get(
+    "SCF_DISPATCH_WEB_URL", "https://dispatch-web-booyfgej7a-ts.a.run.app"
+)
+
+
+def dispatch_web_url() -> str:
+    return DISPATCH_WEB_URL
 UNRELATED_SERVICE: Final[str] = "site-directory"  # IAM proof C negative target
 
 # --- Deliberate exclusions ---------------------------------------------------
