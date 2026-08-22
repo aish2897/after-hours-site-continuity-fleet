@@ -483,3 +483,47 @@ connect, TLS handshake, connect latency, connect error, and the derived
 signal strength or a controller. A test asserts those terms appear nowhere in
 the evidence surface, so a future change cannot start implying Wi-Fi health
 without real Wi-Fi telemetry behind it.
+
+---
+
+## Director acceptance — Test 3 finding, patched
+
+**Accepted as functionally correct.** Security & Identity only, Systems and
+Network not required, no proposal, no policy authorization, no mutation, safe
+human handover. Unchanged.
+
+The wording overstated what was known. The security check reads one Cloud Run
+service's IAM policy and ingress setting — a posture observation about
+`dispatch-web`. It is not an investigation of staff sign-in accounts, and it
+cannot confirm or deny the problem a manager reports when their people cannot
+log in.
+
+| | Before | After |
+|---|---|---|
+| Headline | "We are working on your dispatch service." | "This sign-in issue needs specialist attention." |
+| Finding | "The sign-in settings for the dispatch service need a person to look at them." | "We couldn't verify the sign-in problem with the checks currently available. The details have been prepared for an identity and access specialist." |
+| Next | "Nothing on your site has been changed." | unchanged, as required |
+
+The clean-posture branch was scoped the same way, since it carried the identical
+overclaim in the opposite direction: "the dispatch service's own access settings
+look correct — that check does not cover staff sign-in accounts."
+
+Live re-run, `INC-20260822-D9AC42`:
+
+```
+required   ['security']    consulted ['security']
+proposal   none            decision none          mutated none
+
+headline   This sign-in issue needs specialist attention.
+found      We couldn't verify the sign-in problem with the checks currently
+           available. The details have been prepared for an identity and
+           access specialist.
+next       Nothing on your site has been changed. The details have been
+           prepared for a technical responder.
+```
+
+The headline is still derived from state, not composed by a model: it reads
+`remediation_state`, `awaiting_human` and `specialists_consulted` and nothing
+else. A test pins all four headline branches.
+
+Routing, policy, evidence and security behaviour are untouched.

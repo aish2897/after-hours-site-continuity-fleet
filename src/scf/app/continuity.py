@@ -84,9 +84,31 @@ def _what_we_found(request: ContinuityRequest) -> list[str]:
         found.append("The dispatch application is responding normally.")
 
     if request.identity_posture_sound is False:
-        found.append("The sign-in settings for the dispatch service need a person to look at them.")
+        # Say what could not be established, not what is wrong.
+        #
+        # The check behind this reads the dispatch service's own IAM policy and
+        # ingress setting. It is a posture observation about one Cloud Run
+        # service. It is not an investigation of staff sign-in accounts, and it
+        # cannot confirm or deny the problem a manager is reporting when their
+        # people cannot log in.
+        #
+        # The earlier sentence — "the sign-in settings for the dispatch service
+        # need a person to look at them" — was accepted in Director testing as
+        # overstating it, and it did: it read as a diagnosis, telling a manager
+        # their identity configuration was proven faulty on the strength of an
+        # observation that says nothing of the kind.
+        found.append(
+            "We couldn't verify the sign-in problem with the checks currently "
+            "available. The details have been prepared for an identity and "
+            "access specialist."
+        )
     elif request.identity_posture_sound is True:
-        found.append("Sign-in and access settings for the dispatch service look correct.")
+        # Same scope, stated the other way. A clean posture read on the service
+        # is not a clean bill of health for anyone's login.
+        found.append(
+            "The dispatch service's own access settings look correct. That "
+            "check does not cover staff sign-in accounts."
+        )
 
     if not found:
         # The honest answer when nothing was established. Naming a likely cause
@@ -97,6 +119,25 @@ def _what_we_found(request: ContinuityRequest) -> list[str]:
             "trustworthy answer."
         )
     return found
+
+
+def _headline(request: ContinuityRequest) -> str:
+    """One line naming what this incident actually is.
+
+    "We are working on your dispatch service" is wrong for a sign-in problem
+    that nothing automatic can fix: it promises activity on the service when the
+    real answer is that a person with identity access has to look. Naming the
+    shape of the problem is more useful than a generic reassurance, and it is
+    still derived from state rather than composed by a model.
+    """
+    state = (request.remediation_state or "").upper()
+    if state == "RESOLVED":
+        return "Your dispatch service has been restored."
+    if request.awaiting_human:
+        return "A recovery is ready and needs your approval."
+    if "security" in request.specialists_consulted and state != "RESOLVED":
+        return "This sign-in issue needs specialist attention."
+    return "We are working on your dispatch service."
 
 
 def _what_happens_next(request: ContinuityRequest) -> str:
@@ -146,11 +187,7 @@ async def status(
     found = _what_we_found(request)
     message = {
         "incident_id": request.incident_id,
-        "headline": (
-            "Your dispatch service has been restored."
-            if (request.remediation_state or "").upper() == "RESOLVED"
-            else "We are working on your dispatch service."
-        ),
+        "headline": _headline(request),
         "what_we_found": found,
         "what_happens_next": _what_happens_next(request),
         "who_checked": [

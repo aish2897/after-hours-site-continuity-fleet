@@ -456,3 +456,96 @@ def test_the_observations_are_the_trusted_facts_not_a_narrative():
     block = source[source.index("network_observations"):]
     for key in ("dns_resolves", "tcp_connect_ok", "tls_handshake_ok"):
         assert f'facts.get("{key}")' in block, key
+
+
+# --- a posture observation is not a diagnosis --------------------------------
+
+
+def test_an_identity_finding_never_reads_as_a_proven_fault():
+    """Director acceptance, Test 3.
+
+    The security check reads one Cloud Run service's IAM policy and ingress. It
+    is not an investigation of staff sign-in accounts. Reporting it as "the
+    sign-in settings need a person to look at them" told a manager their
+    identity configuration was proven faulty on evidence that says nothing of
+    the kind.
+    """
+    unsound = continuity.ContinuityRequest(
+        incident_id="INC-1",
+        identity_posture_sound=False,
+        specialists_consulted=["security"],
+        remediation_state="ESCALATED",
+        changed_anything=False,
+    )
+    line = continuity._what_we_found(unsound)[0]
+
+    assert "couldn't verify the sign-in problem" in line
+    assert "identity and access specialist" in line
+    # None of the claims the check cannot support.
+    for overclaim in ("need a person to look at them", "are faulty",
+                      "is misconfigured", "caused"):
+        assert overclaim not in line.lower(), overclaim
+
+
+def test_a_clean_posture_read_is_not_a_clean_bill_of_health():
+    sound = continuity.ContinuityRequest(
+        incident_id="INC-1", identity_posture_sound=True,
+        specialists_consulted=["security"],
+    )
+    line = continuity._what_we_found(sound)[0]
+    assert "does not cover staff sign-in accounts" in line
+    assert "sign-in and access settings for the dispatch service look correct"         not in line.lower()
+
+
+def test_the_headline_names_the_problem_rather_than_promising_activity():
+    signin = continuity.ContinuityRequest(
+        incident_id="INC-1",
+        identity_posture_sound=False,
+        specialists_consulted=["security"],
+        remediation_state="ESCALATED",
+    )
+    assert continuity._headline(signin) == "This sign-in issue needs specialist attention."
+
+    # The other headlines are unchanged.
+    resolved = continuity.ContinuityRequest(
+        incident_id="INC-1", remediation_state="RESOLVED",
+        specialists_consulted=["security"],
+    )
+    assert continuity._headline(resolved) == "Your dispatch service has been restored."
+
+    waiting = continuity.ContinuityRequest(
+        incident_id="INC-1", awaiting_human=True, specialists_consulted=["systems"],
+    )
+    assert "approval" in continuity._headline(waiting)
+
+    plain = continuity.ContinuityRequest(
+        incident_id="INC-1", specialists_consulted=["systems"],
+        remediation_state="ESCALATED",
+    )
+    assert continuity._headline(plain) == "We are working on your dispatch service."
+
+
+def test_the_no_change_assurance_is_kept():
+    """The one sentence Director acceptance asked to preserve verbatim."""
+    unchanged = continuity.ContinuityRequest(
+        incident_id="INC-1",
+        identity_posture_sound=False,
+        specialists_consulted=["security"],
+        remediation_state="ESCALATED",
+        changed_anything=False,
+    )
+    assert continuity._what_happens_next(unchanged).startswith(
+        "Nothing on your site has been changed."
+    )
+
+
+def test_zero_trusted_findings_produces_no_finding_sentences_at_all():
+    """With nothing established, the Coordinator must not fill the gap."""
+    nothing = continuity.ContinuityRequest(
+        incident_id="INC-1", specialists_consulted=["security"],
+        remediation_state="ESCALATED",
+    )
+    found = continuity._what_we_found(nothing)
+    assert len(found) == 1
+    assert "could not establish" in found[0].lower()
+    assert "sign-in" not in found[0].lower()
