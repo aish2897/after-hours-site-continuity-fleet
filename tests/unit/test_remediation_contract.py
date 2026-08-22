@@ -169,7 +169,12 @@ def test_no_application_level_fabricated_permission_denial():
     OWN_AUTHORIZATION_DECISION = "approver_not_authorized"
     offenders = []
     for path in SRC.rglob("*.py"):
-        text = path.read_text(encoding="utf-8")
+        # Code only. The modules that must NOT fabricate a denial are exactly
+        # the ones whose docstrings explain that they do not — the Director
+        # console says it "returns the 403 that Cloud Run produced, unmodified",
+        # and matching that sentence flags the module for describing the
+        # correct behaviour. Prose has tripped this suite before.
+        text = _stripped(path)
         for match in pattern.finditer(text):
             # A window PAST the match: the pattern ends at "403", so the detail
             # that names the decision sits just beyond it.
@@ -179,6 +184,19 @@ def test_no_application_level_fabricated_permission_denial():
             offenders.append(str(path.relative_to(REPO_ROOT)))
             break
     assert not offenders, f"fabricated permission denial found in: {offenders}"
+
+
+def _stripped(path) -> str:
+    """Source with docstrings removed, so guards match code rather than prose."""
+    import ast
+
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    for node in ast.walk(tree):
+        if isinstance(
+            node, (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
+        ) and ast.get_docstring(node):
+            node.body = node.body[1:]
+    return ast.unparse(tree)
 
 
 def test_the_only_self_issued_403_is_the_approval_refusal():

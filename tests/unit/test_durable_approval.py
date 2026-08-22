@@ -61,10 +61,14 @@ def test_approval_requirement_comes_from_the_policy_not_the_caller():
     assert decision.required_approval_role == "incident_commander"
 
     # And the intake contract gives a caller no way to ask for a regime.
+    # A screenshot is input, not authority: it can change which specialist is
+    # asked to look and nothing else.
     assert set(main.IncidentIntake.model_fields) == {
         "description",
         "site_id",
         "reported_by",
+        "image_base64",
+        "image_media_type",
     }
     assert main.IncidentIntake.model_config["extra"] == "forbid"
 

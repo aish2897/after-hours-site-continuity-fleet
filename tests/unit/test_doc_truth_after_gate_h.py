@@ -33,8 +33,14 @@ def _text(path: Path) -> str:
 # --- the model boundary ------------------------------------------------------
 
 
-def test_exactly_one_module_calls_a_model():
-    """The claim every doc rests on. If this changes, the docs are wrong."""
+def test_only_the_orchestrator_modules_call_a_model():
+    """The claim every doc rests on. If this changes, the docs are wrong.
+
+    Two modules, both owned by the orchestrator: `routing` decides which
+    specialists to consult, and `vision` transcribes an attached screenshot so
+    the text can be screened before routing reads it. No specialist service
+    calls a model, which is the property the documents actually assert.
+    """
     callers = set()
     for path in (ROOT / "src/scf").rglob("*.py"):
         source = _text(path)
@@ -43,7 +49,13 @@ def test_exactly_one_module_calls_a_model():
             for marker in ("LlmAgent(", "generate_content(", "InMemoryRunner(")
         ):
             callers.add(path.relative_to(ROOT).as_posix())
-    assert callers == {"src/scf/agents/routing.py"}, callers
+    assert callers == {
+        "src/scf/agents/routing.py",
+        "src/scf/agents/vision.py",
+    }, callers
+    # Both live under agents/, which the orchestrator alone runs.
+    for caller in callers:
+        assert caller.startswith("src/scf/agents/"), caller
 
 
 def test_no_specialist_is_registered_as_llm_backed():

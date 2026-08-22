@@ -13,7 +13,10 @@ adk = ["google-adk>=2.7", "google-genai>=2.18"]
 where = ["src"]
 
 [tool.setuptools.package-data]
-scf = ["policies/*.json"]
+# The built Director console is package data, not source. Without this the
+# buildpack installs only the .py files and the service answers its API while
+# serving a 404 for the page — which is exactly what happened the first time.
+scf = ["policies/*.json", "app/console/*", "app/console/assets/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

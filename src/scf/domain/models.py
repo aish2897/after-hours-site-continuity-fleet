@@ -96,10 +96,6 @@ class RoutingDecision(Frozen):
 
     routes: list[SpecialistRoute] = Field(min_length=1)
     summary: str = ""
-    #: Error text the model transcribed from an attached screenshot. Untrusted
-    #: throughout: it is shown to the manager and screened, and it never becomes
-    #: evidence. Nothing downstream reads it to decide anything.
-    observed_text: str = ""
     model_id: str | None = None
     created_at: datetime = Field(default_factory=utc_now)
 

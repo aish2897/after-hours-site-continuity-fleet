@@ -49,6 +49,7 @@ from scf.domain.models import (
 )
 from scf.obs import log_event, trace_id_from_header
 from scf.policy import default_registry, evaluate, trusted_evidence_map
+from scf.agents.vision import transcribe_screenshot
 from scf.security import ScreeningUnavailable, screen_untrusted_text
 from scf.state import IncidentNotFound, IncidentRepository
 from scf.state.firestore_repo import ApprovalNotFound
@@ -320,10 +321,96 @@ async def create_incident(
 
     log_event("model_armor_allowed", trace_id=trace_id, incident_id=incident_id,
               **screening.as_log_fields())
+    # Read the screenshot, then screen what it said, then route.
+    #
+    # Model Armor screens text and cannot screen a picture. Sending the image
+    # straight to the routing model would put unscreened content in front of a
+    # decision step, so the read is split out: one call whose only job is
+    # transcription, its output screened exactly like the typed report, and only
+    # then does the routing model see anything. The routing model never sees the
+    # image at all.
+    observed_from_image = ""
+    if attached_image is not None:
+        try:
+            observed_from_image = await run_in_threadpool(
+                transcribe_screenshot, attached_image[0], attached_image[1]
+            )
+            log_event(
+                "screenshot_transcribed",
+                trace_id=trace_id,
+                incident_id=incident_id,
+                transcript_chars=len(observed_from_image),
+            )
+        except Exception as unreadable:  # noqa: BLE001 - the report still stands
+            # An unreadable screenshot costs the incident a signal, not its
+            # safety. The typed report is already screened and routing proceeds
+            # on that alone rather than stranding the manager.
+            log_event(
+                "screenshot_unreadable",
+                severity="WARNING",
+                trace_id=trace_id,
+                incident_id=incident_id,
+                error_type=type(unreadable).__name__,
+            )
+
+    if observed_from_image.strip():
+        try:
+            image_screening = await run_in_threadpool(
+                screen_untrusted_text, observed_from_image
+            )
+        except Exception as unavailable:  # noqa: BLE001 - fail closed
+            image_screening = None
+            log_event(
+                "image_text_screening_unavailable",
+                severity="ERROR",
+                trace_id=trace_id,
+                incident_id=incident_id,
+                error_type=type(unavailable).__name__,
+            )
+        if image_screening is None or not image_screening.allowed:
+            triggered = (
+                list(image_screening.triggered_filters) if image_screening else []
+            )
+            log_event(
+                "model_armor_blocked_image_text",
+                severity="WARNING",
+                trace_id=trace_id,
+                incident_id=incident_id,
+                triggered_filters=triggered,
+            )
+            blocked_image = await _fail(
+                repo,
+                incident_id,
+                WorkflowFailure(
+                    FailureCategory.UNTRUSTED_CONTENT_BLOCKED
+                    if image_screening is not None
+                    else FailureCategory.SECURITY_SCREENING_UNAVAILABLE,
+                    "screening refused text read from the attached screenshot",
+                    triggered_filters=triggered,
+                ),
+                trace_id,
+                {"attempted": True, "specialists_attempted": []},
+            )
+            final = await run_in_threadpool(repo.get, incident_id)
+            return IncidentCreated(
+                incident_id=incident_id,
+                status=final["status"],
+                summary=blocked_image["escalation"]["impact"],
+                required_specialists=[],
+                routes=[],
+                remediation=blocked_image,
+                trace_id=trace_id,
+                observed_text=observed_from_image,
+                image_attached=True,
+                screening=(
+                    image_screening.as_log_fields() if image_screening else {}
+                ),
+            )
+
     log_event("adk_invocation_started", trace_id=trace_id, incident_id=incident_id,
               model=config.VERIFIED_MODEL_ID, model_location=config.MODEL_LOCATION)
     try:
-        decision = await route_incident(intake.description, image=attached_image)
+        decision = await route_incident(intake.description, observed_from_image)
     except Exception as exc:  # noqa: BLE001 - categorised, never re-raised raw
         # The incident is already persisted, so failing the HTTP call here would
         # strand it at INTAKE with nobody told and nothing to reconcile. It is
@@ -358,78 +445,6 @@ async def create_incident(
             image_attached=attached_image is not None,
             screening=screening.as_log_fields(),
         )
-
-    # Model Armor screens the typed report before any model reads it. A
-    # screenshot cannot work that way — something has to look at the picture
-    # before there is any text to screen. So the transcription the routing model
-    # produces is screened here, after the fact, and a hit still stops the
-    # incident: routing alone has mutated nothing, and the decision is discarded
-    # rather than acted on.
-    #
-    # This is narrower than the text path and is documented as such. It catches
-    # hostile instructions the model transcribed faithfully. It cannot catch
-    # what the model declined to transcribe, and it is not the reason a
-    # screenshot is safe — that reason is structural: the only thing the model
-    # may emit after looking at an image is a set of specialists from a closed
-    # enum, so image content can never become TRUSTED_TOOL evidence or an action.
-    if attached_image is not None and decision.observed_text.strip():
-        try:
-            image_screening = await run_in_threadpool(
-                screen_untrusted_text, decision.observed_text
-            )
-        except Exception as unavailable:  # noqa: BLE001 - fail closed, as above
-            image_screening = None
-            log_event(
-                "image_text_screening_unavailable",
-                severity="ERROR",
-                trace_id=trace_id,
-                incident_id=incident_id,
-                error_type=type(unavailable).__name__,
-            )
-        if image_screening is None or image_screening.blocked:
-            triggered = (
-                list(image_screening.triggered_filters) if image_screening else []
-            )
-            log_event(
-                "model_armor_blocked_image_text",
-                severity="WARNING",
-                trace_id=trace_id,
-                incident_id=incident_id,
-                triggered_filters=triggered,
-            )
-            category = (
-                FailureCategory.UNTRUSTED_CONTENT_BLOCKED
-                if image_screening is not None
-                else FailureCategory.SECURITY_SCREENING_UNAVAILABLE
-            )
-            blocked_image = await _fail(
-                repo,
-                incident_id,
-                WorkflowFailure(
-                    category,
-                    "screening refused text read from the attached screenshot",
-                    triggered_filters=triggered,
-                ),
-                trace_id,
-                {"attempted": True, "specialists_attempted": []},
-            )
-            final = await run_in_threadpool(repo.get, incident_id)
-            return IncidentCreated(
-                incident_id=incident_id,
-                status=final["status"],
-                summary=blocked_image["escalation"]["impact"],
-                required_specialists=[],
-                routes=[],
-                remediation=blocked_image,
-                trace_id=trace_id,
-                observed_text=decision.observed_text,
-                image_attached=True,
-                screening=(
-                    image_screening.as_log_fields() if image_screening else {}
-                ),
-            )
-
-    observed_from_image = decision.observed_text if attached_image else ""
 
     # The model proposes a specialist set; the governed catalog decides which of
     # those may actually be routed to. A specialist that is disabled or has no

@@ -1,6 +1,6 @@
 """Single entrypoint that selects a runtime by SCF_ROLE.
 
-One source tree, seven Cloud Run services, seven distinct service accounts. The
+One source tree, nine Cloud Run services, each with its own service account. The
 role only chooses which FastAPI app is served; it grants nothing. Authority
 comes from the runtime identity Cloud Run attaches, not from this variable.
 """
@@ -21,6 +21,8 @@ elif SCF_ROLE == "continuity":
     from scf.app.continuity import app
 elif SCF_ROLE == "approval":
     from scf.app.approval import app
+elif SCF_ROLE == "director":
+    from scf.app.director import app
 elif SCF_ROLE == "executor":
     from scf.app.executor import app
 elif SCF_ROLE == "verifier":

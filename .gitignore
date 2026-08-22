@@ -15,3 +15,9 @@ build/
 tmp/
 local_state/
 
+
+# Build output: the Director console, produced by infra/build-console.sh
+# and served as package data. Generated, so not tracked — but it MUST be
+# built before `gcloud run deploy scf-director`, or the service answers its
+# API and serves a 404 for the page.
+src/scf/app/console/

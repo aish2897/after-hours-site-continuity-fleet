@@ -1175,8 +1175,14 @@ def test_the_readme_does_not_claim_a_boundary_that_does_not_exist():
 
     root = Path(__file__).resolve().parents[2]
     readme = " ".join((root / "README.md").read_text(encoding="utf-8").lower().split())
+    # Model Armor now screens untrusted input, so the old "no inspection step"
+    # sentence would itself be stale. What must never come back is the
+    # overclaim: screening is a filter, and the README has to keep saying that
+    # the guarantee rests on trust levels rather than on the screener.
     assert "an explicit classification and security boundary governs" not in readme
-    assert "there is no classification or inspection step today" in readme
+    assert "screened by model armor before the routing model reads it" in readme
+    assert "that is a filter, not the boundary" in readme
+    assert "can never satisfy a policy condition" in readme
 
 
 def test_duplicate_health_keys_are_caught_while_the_pairs_are_visible():

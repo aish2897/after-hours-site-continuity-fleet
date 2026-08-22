@@ -414,27 +414,30 @@ Aug 31 is submission, link and access buffer **only**. No feature development.
 | Field | Value |
 |---|---|
 | Latest commit | see `git log --oneline -1` |
-| Offline tests | 596 collected (585 passed, 11 skipped) |
-| Current gate | **Gate H CLOSED / VERIFIED** — full fleet, selective routing, registry governance |
+| Offline tests | 625 collected (614 passed, 11 skipped); frontend 18 passed |
+| Current gate | **Gate I — READY FOR DIRECTOR ACCEPTANCE TEST** (not verified) |
 | Gate E status | **VERIFIED**; Codex catch-up findings fixed |
 | Gate F status | **VERIFIED**; approval identity corrected by Codex High 2 |
 | Gate G status | **VERIFIED** (Model Armor live, including a documented miss) |
 | Codex High 1 | **CLOSED** — any screening failure fails closed without a 500 |
 | Codex High 2 | **CLOSED** — approval lives on `scf-approval`; IAM is the gate |
 | Gate H status | **VERIFIED** — see `docs/evidence/gate-h-fleet-registry.md` |
-| Next | Director UI Alpha. **Not started, not yet authorized.** |
+| Gate I status | Deployed and exercised end to end. Acceptance requires hands-on Director testing |
+| Director console | https://scf-director-911485617985.australia-southeast1.run.app |
+| Next | Director acceptance pass, then submission assembly |
 | Public repo | https://github.com/aish2897/after-hours-site-continuity-fleet |
 
 Deployed Cloud Run revisions (Sydney):
 
 | Service | Revision |
 |---|---|
-| `scf-orchestrator` | `scf-orchestrator-00170-9qd` |
+| `scf-orchestrator` | `scf-orchestrator-00173-kwf` |
 | `scf-agent-systems` | `scf-agent-systems-00126-ksp` |
 | `scf-agent-network` | `scf-agent-network-00001-dh7` |
 | `scf-agent-security` | `scf-agent-security-00001-2d4` |
 | `scf-agent-continuity` | `scf-agent-continuity-00001-mng` |
 | `scf-approval` (human surface) | `scf-approval-00002-5hm` |
+| `scf-director` (console, holds nothing) | `scf-director-00004-fp8` |
 | `scf-executor` | `scf-executor-00117-pjn` |
 | `scf-verifier` | `scf-verifier-00039-jfm` |
 | `dispatch-web` (target) | `dispatch-web-00004-jqm` |

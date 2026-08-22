@@ -120,7 +120,9 @@ capability beyond the state recorded here.
 | Model Armor response screening | `IMPLEMENTED` | adapter supports it; not on the live path, so not claimed |
 | Approval state survives process replacement | **`VERIFIED`** | [`gate-f`](docs/evidence/gate-f-durable-approval-resume.md) — two orchestrator revisions replaced across one incident. A hard process kill mid-write is **not** proven: Cloud Run drains in-flight requests on redeploy |
 | Network / Security / Continuity runtimes | **`VERIFIED`** | [`gate-h`](docs/evidence/gate-h-fleet-registry.md) — all three deployed under their own identities, all three deterministic and read-only |
-| Duty-manager UI | `IN PROGRESS` | Gate I — Director UI Alpha; not yet accepted by hands-on test |
+| Duty-manager UI (Director console) | `IN PROGRESS` | [`gate-i`](docs/evidence/gate-i-director-ui-multimodal.md) — deployed and exercised end to end; **not accepted** until the Director tests it by hand |
+| Multimodal incident input | `IN PROGRESS` | [`gate-i`](docs/evidence/gate-i-director-ui-multimodal.md) — identical vague text plus three different screenshots routes to three different specialists, and to nothing without an image |
+| Console holds no authority of its own | `IN PROGRESS` | [`gate-i`](docs/evidence/gate-i-director-ui-multimodal.md) — `sa-director` holds no `run.invoker` anywhere; the console forwards the caller's own token |
 
 Boundaries of the claim, stated precisely:
 
@@ -146,6 +148,40 @@ Boundaries of the claim, stated precisely:
 - One investigator is deployed; the other three are contracts only.
 
 See [`STATUS.md`](STATUS.md) for the current phase and next gate.
+
+## The Director console
+
+A duty manager opens one URL and describes what they are seeing, in their own
+words, optionally with a photo of the screen. Everything else — which
+specialists get consulted, what may be done automatically, what needs a person —
+happens behind that one question.
+
+```
+https://scf-director-911485617985.australia-southeast1.run.app
+```
+
+Sign-in is a Google identity token, pasted once per session:
+
+```
+gcloud auth print-identity-token
+```
+
+That is deliberate rather than unfinished. The console **holds no credential of
+its own** — `sa-director` has no `run.invoker` on any service — and forwards the
+caller's token instead. A console acting under its own identity would have needed
+invoker rights on `scf-approval`, which would have made "no autonomous identity
+can approve an autonomous decision" false by way of the convenience layer. See
+[`gate-i`](docs/evidence/gate-i-director-ui-multimodal.md).
+
+To build and deploy it:
+
+```
+bash infra/build-console.sh
+gcloud run deploy scf-director --source=. --region=australia-southeast1   --service-account=sa-director@site-continuity-fleet.iam.gserviceaccount.com   --set-env-vars="SCF_ROLE=director,SCF_ORCHESTRATOR_URL=...,SCF_APPROVAL_URL=..."   --allow-unauthenticated
+```
+
+The build step is required: the console ships as package data, and without it the
+deploy answers its API perfectly while serving a 404 for the page.
 
 ## What exists today
 

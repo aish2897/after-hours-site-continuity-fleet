@@ -1,25 +1,13 @@
-# Patterns are anchored with a leading slash so they match only at the repo
-# root. An unanchored "tools/" also matches src/scf/tools/, which silently
-# shipped a package without it and failed at import on Cloud Run.
-/.git/
-/.gitignore
-/.venv/
-__pycache__/
-*.py[cod]
-/.pytest_cache/
-/.mypy_cache/
-/.ruff_cache/
-/.coverage
-/htmlcov/
-/docs/
-/tests/
-/tools/
-/infra/
-/deployment/
-/services/
-/STATUS.md
-/README.md
-/ARCHITECTURE.md
-/SECURITY.md
-/COMPETITION.md
-/AGENT_CONTRACTS.md
+# Keep the uploaded build context small and free of local junk.
+#
+# The built console lives in src/scf/app/console (see infra/build-console.sh).
+# The whole web/ source tree is excluded: it is only needed to produce that
+# output, and shipping node_modules or TypeScript sources into a Python image
+# is pure weight.
+.git/
+.venv/
+**/__pycache__/
+**/node_modules/
+web/
+docs/evidence/raw/
+*.pyc
