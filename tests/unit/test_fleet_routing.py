@@ -208,7 +208,9 @@ def test_the_manager_message_is_plain_and_carries_no_internals():
     )
     found = continuity._what_we_found(request)
     text = " ".join(found) + " " + continuity._what_happens_next(request)
-    assert "network is reachable" in text.lower()
+    # Scoped to what the probe actually did — see the Director Test 2
+    # finding below. This assertion previously pinned the overclaim.
+    assert "reachable from our network check" in text.lower()
     assert "not responding correctly" in text.lower()
     # No revisions, no traffic percentages, no model reasoning.
     for internal in ("revision", "resourceVersion", "AUTO_ALLOWED", "dispatch-web-00"):
@@ -388,3 +390,69 @@ def test_competence_scoping_cannot_authorize_anything():
         AgentRegistry.may_establish
     )
     assert "may_establish" not in inspect.getsource(engine)
+
+
+# --- the network check must not be described as more than it is --------------
+
+
+def test_reachability_is_never_reported_as_healthy_wifi():
+    """Director acceptance, Test 2.
+
+    The old sentence — "the site network is reachable, the connection to the
+    dispatch service is fine" — reads as "your Wi-Fi is fine" to a manager whose
+    scanners are dropping out. The check is a DNS lookup plus TCP and TLS from
+    an agent in Google Cloud, at one instant. It observes no site equipment at
+    all, and no Wi-Fi telemetry exists anywhere in this system.
+    """
+    reachable = continuity.ContinuityRequest(
+        incident_id="INC-1", network_reachable=True
+    )
+    line = continuity._what_we_found(reachable)[0].lower()
+
+    assert "reachable from our network check" in line
+    assert "do not yet have direct evidence" in line
+    assert "wi-fi" in line
+
+    # None of the claims the evidence cannot support.
+    for overclaim in ("network is fine", "connection to the dispatch service is fine",
+                      "wi-fi is fine", "wi-fi is healthy", "your network is healthy"):
+        assert overclaim not in line, overclaim
+
+
+def test_an_unreachable_result_is_also_scoped_to_the_check():
+    unreachable = continuity.ContinuityRequest(
+        incident_id="INC-1", network_reachable=False
+    )
+    line = continuity._what_we_found(unreachable)[0].lower()
+    assert "our network check" in line
+    # It must not assert the site itself is offline; the probe cannot know that.
+    assert "the site could not be reached" not in line
+
+
+def test_no_component_claims_wifi_telemetry_it_does_not_have():
+    """There is no Wi-Fi signal anywhere in the evidence surface."""
+    from scf.tools import network_evidence
+
+    emitted = _code_only(network_evidence)
+    for absent in ("wifi", "wi_fi", "access_point", "ssid", "rssi", "wlan"):
+        assert absent not in emitted.lower(), absent
+
+
+def test_the_network_observations_name_what_was_not_observed():
+    source = inspect.getsource(main._run_fleet)
+    assert "network_observations" in source
+    assert "not_observed" in source
+    assert "vantage_point" in source
+    # The observations are only attached when Network actually ran.
+    assert 'if "network" in consulted:' in source
+    for named in ("Wi-Fi access points", "handheld scanners",
+                  "outside the instant of this probe"):
+        assert named in source, named
+
+
+def test_the_observations_are_the_trusted_facts_not_a_narrative():
+    """They come from the evidence map, so they cannot drift from the probe."""
+    source = inspect.getsource(main._run_fleet)
+    block = source[source.index("network_observations"):]
+    for key in ("dns_resolves", "tcp_connect_ok", "tls_handshake_ok"):
+        assert f'facts.get("{key}")' in block, key

@@ -770,6 +770,12 @@ function EvidenceDrawer({ incident }: { incident: Incident }) {
             )}
           </Group>
 
+          {remediation.network_observations && (
+            <NetworkObservations
+              observations={remediation.network_observations}
+            />
+          )}
+
           <Group title="Deterministic policy">
             <Row k="Decision" v={remediation.decision ?? "none"} />
             <Row k="Reason code" v={remediation.reason_code ?? "—"} />
@@ -850,6 +856,48 @@ function verdictText(
   }
   if (Object.keys(screening).length === 0) return "no verdict recorded";
   return "allowed";
+}
+
+function NetworkObservations({
+  observations,
+}: {
+  observations: Record<string, any>;
+}) {
+  /**
+   * What the network check actually did — and, just as importantly, what it did
+   * not do.
+   *
+   * "Reachable" here means a DNS lookup resolved and a TCP connection with a
+   * TLS handshake completed, from an agent running in Google Cloud, at one
+   * instant. A responder reading the word without that scope could reasonably
+   * conclude the site's Wi-Fi is healthy, which nothing in this system observes.
+   */
+  const ok = (value: unknown) =>
+    value === true ? "yes" : value === false ? "no" : "—";
+  const ms = (value: unknown) =>
+    typeof value === "number" ? `${value} ms` : "—";
+
+  return (
+    <Group title="Network check — what was observed">
+      <Row k="Vantage point" v={observations.vantage_point ?? "—"} plain />
+      <Row k="Host tested" v={observations.target_host ?? "—"} />
+      <Row k="DNS resolved" v={ok(observations.dns_resolves)} />
+      <Row k="DNS latency" v={ms(observations.dns_latency_ms)} />
+      <Row k="TCP connected" v={ok(observations.tcp_connect_ok)} />
+      <Row k="TLS handshake" v={ok(observations.tls_handshake_ok)} />
+      <Row k="Connect latency" v={ms(observations.connect_latency_ms)} />
+      <Row k="Observed at" v={observations.observed_at ?? "—"} />
+      <div className="ev-group-title" style={{ marginTop: 16 }}>
+        Not observed
+      </div>
+      {(observations.not_observed ?? []).map((item: string) => (
+        <div className="ev-row" key={item}>
+          <div className="ev-key">—</div>
+          <div className="ev-val plain">{item}</div>
+        </div>
+      ))}
+    </Group>
+  );
 }
 
 function Group({ title, children }: { title: string; children: React.ReactNode }) {

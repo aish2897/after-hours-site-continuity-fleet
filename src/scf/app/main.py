@@ -2832,6 +2832,38 @@ async def _run_fleet(
     if withheld:
         outcome["specialists_withheld_by_registry"] = withheld
 
+    if "network" in consulted:
+        # Surface what the network check actually did, and name what it did not
+        # do. `network_reachable=True` is a DNS lookup plus a TCP and TLS
+        # connection, made by an agent in Google Cloud, at one instant. A
+        # responder reading "reachable" needs to see that it means the service
+        # answered *us* — not that the warehouse's Wi-Fi is healthy, which
+        # nothing here observes.
+        observed_at = next(
+            (
+                item.collected_at.isoformat()
+                for item in fleet_evidence
+                if item.source_agent == "network" and item.key == "network_reachable"
+            ),
+            None,
+        )
+        outcome["network_observations"] = {
+            "target_host": facts.get("network_target_host"),
+            "dns_resolves": facts.get("dns_resolves"),
+            "dns_latency_ms": facts.get("dns_latency_ms"),
+            "tcp_connect_ok": facts.get("tcp_connect_ok"),
+            "tls_handshake_ok": facts.get("tls_handshake_ok"),
+            "connect_latency_ms": facts.get("connect_latency_ms"),
+            "observed_at": observed_at,
+            "vantage_point": "scf-agent-network on Cloud Run, not the site",
+            "not_observed": [
+                "site Wi-Fi access points or controller telemetry",
+                "the link between the site and the internet",
+                "client devices such as the handheld scanners",
+                "anything outside the instant of this probe",
+            ],
+        }
+
     status = await _compose_manager_status(
         incident_id, consulted, facts, outcome, trace_id, trace_header
     )

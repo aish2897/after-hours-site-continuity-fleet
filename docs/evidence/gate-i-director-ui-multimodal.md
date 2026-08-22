@@ -432,3 +432,54 @@ acceptance pass. Each names the incident state that produces it:
 - **Not yet Director-accepted.** Everything above was exercised through the
   console's own API — the same endpoint, shape and token the browser uses — but
   a person has not yet clicked the buttons.
+
+---
+
+## Director acceptance — Test 2 finding, patched
+
+**Accepted as functionally correct**, and the wording was wrong anyway.
+
+Network routed first, trusted network evidence came back reachable, Systems was
+delegated to on that evidence, the gate found the evidence insufficient, nothing
+was mutated, and the incident went to a person. That part stands.
+
+But the Coordinator said:
+
+> "The site network is reachable — the connection to the dispatch service is
+> fine."
+
+For a manager reporting scanners dropping out in the loading bay, that reads as
+*your Wi-Fi is fine*. The check cannot know that. It is a DNS lookup plus a TCP
+connection and TLS handshake, made by an agent running in Google Cloud, at one
+instant. It observes no equipment at the site at all.
+
+Now:
+
+> "The dispatch service is reachable from our network check. We do not yet have
+> direct evidence of the Wi-Fi or network equipment at your site."
+
+And the technical drawer shows the observation itself, including its limits:
+
+```
+vantage point     scf-agent-network on Cloud Run, not the site
+host tested       dispatch-web-booyfgej7a-ts.a.run.app
+DNS resolved      yes        8.3 ms
+TCP connected     yes
+TLS handshake     yes        3.3 ms
+observed at       2026-08-22T11:26:56Z
+
+not observed      site Wi-Fi access points or controller telemetry
+                  the link between the site and the internet
+                  client devices such as the handheld scanners
+                  anything outside the instant of this probe
+```
+
+Routing and policy are unchanged; only wording and disclosure changed.
+
+**There is no Wi-Fi telemetry in this system.** The Network investigator emits
+ten evidence keys — host, DNS resolution, addresses, DNS latency, DNS error, TCP
+connect, TLS handshake, connect latency, connect error, and the derived
+`network_reachable` — and not one of them observes an access point, an SSID, a
+signal strength or a controller. A test asserts those terms appear nowhere in
+the evidence surface, so a future change cannot start implying Wi-Fi health
+without real Wi-Fi telemetry behind it.

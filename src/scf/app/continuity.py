@@ -55,9 +55,28 @@ def _what_we_found(request: ContinuityRequest) -> list[str]:
     """One plain sentence per thing actually established. No inference."""
     found: list[str] = []
     if request.network_reachable is True:
-        found.append("The site network is reachable — the connection to the dispatch service is fine.")
+        # Say what was actually observed, and from where.
+        #
+        # The earlier wording — "the site network is reachable, the connection
+        # to the dispatch service is fine" — was accepted in Director testing as
+        # misleading, and it was. The check is a DNS lookup plus a TCP and TLS
+        # connection made by an agent running in Google Cloud, at one instant.
+        # It says the dispatch service answered that agent. It says nothing
+        # about the warehouse's own Wi-Fi, nothing about the link between the
+        # site and the internet, and nothing about five minutes ago.
+        #
+        # For a manager reporting scanners dropping out in the loading bay, the
+        # old sentence read as "your Wi-Fi is fine" — advice the system has no
+        # evidence for and cannot get without Wi-Fi telemetry it does not have.
+        found.append(
+            "The dispatch service is reachable from our network check. We do "
+            "not yet have direct evidence of the Wi-Fi or network equipment at "
+            "your site."
+        )
     elif request.network_reachable is False:
-        found.append("The site could not be reached over the network at all.")
+        found.append(
+            "Our network check could not reach the dispatch service at all."
+        )
 
     if request.service_responding is False:
         found.append("The dispatch application itself is not responding correctly.")
