@@ -193,21 +193,26 @@ async def create_incident(
         # incident at INTAKE, which no endpoint can move and no handover
         # describes. The direction was never fail-open; the guarantee that a
         # failure always produces a handover was what got lost.
+        # One safe reason, derived once and used everywhere below. The log call
+        # was guarded and this message was not: a RuntimeError, a credential
+        # refresh failure or a failed metadata write has no `.reason`, so the
+        # fail-closed path itself raised AttributeError and turned a controlled
+        # escalation into a 500. The handler that reports failures must not be
+        # able to fail while reporting one.
+        reason = getattr(unavailable, "reason", type(unavailable).__name__)
         log_event(
             "model_armor_unavailable",
             severity="ERROR",
             trace_id=trace_id,
             incident_id=incident_id,
-            failure_reason=getattr(
-                unavailable, "reason", type(unavailable).__name__
-            ),
+            failure_reason=reason,
         )
         failed = await _fail(
             repo,
             incident_id,
             WorkflowFailure(
                 FailureCategory.SECURITY_SCREENING_UNAVAILABLE,
-                f"security screening could not complete ({unavailable.reason})",
+                f"security screening could not complete ({reason})",
             ),
             trace_id,
             {"attempted": True, "specialists_attempted": []},
@@ -1827,6 +1832,115 @@ DEMO_APPROVER_PRINCIPAL = os.environ.get(
 )
 
 
+#: Who may approve what. Server-side, exact-match, and deliberately not a
+#: pattern: an approval role is a small, deliberately-granted thing, and a
+#: wildcard here would quietly re-open the hole this closes.
+#:
+#: Configured as `role:principal,principal;role:principal`.
+def _load_approver_bindings() -> dict[str, frozenset[str]]:
+    raw = os.environ.get("SCF_APPROVER_BINDINGS", "")
+    bindings: dict[str, frozenset[str]] = {}
+    for clause in filter(None, (part.strip() for part in raw.split(";"))):
+        role, _, members = clause.partition(":")
+        if not role or not members:
+            continue
+        bindings[role.strip()] = frozenset(
+            m.strip().lower() for m in members.split(",") if m.strip()
+        )
+    return bindings
+
+
+APPROVER_ROLE_BINDINGS: dict[str, frozenset[str]] = _load_approver_bindings()
+
+
+class ApprovalForbidden(Exception):
+    """The caller is authenticated, and not authorized to approve this."""
+
+
+def _verified_caller(authorization: str | None) -> str:
+    """The principal Google actually vouched for, or "".
+
+    Cloud Run validates the bearer token before the request arrives, but does
+    not hand the application the identity behind it. So the token is verified
+    again here — signature, issuer and expiry checked against Google's public
+    keys — and the principal is read from the verified claims rather than from
+    anything the caller wrote. A forged or expired token yields "".
+
+    This is why no IAP is needed to answer "who is approving": the answer is in
+    a Google-signed assertion the caller cannot author.
+    """
+    if not authorization or not authorization.lower().startswith("bearer "):
+        return ""
+    token = authorization.split(" ", 1)[1].strip()
+    try:
+        from google.auth.transport import requests as google_requests
+        from google.oauth2 import id_token as google_id_token
+
+        # Skew tolerance, deliberately. Token verification compares the
+        # issuer's `iat` against the verifier's clock, and a machine a minute
+        # out rejects a perfectly valid Google-signed assertion with "token
+        # used too early" — turning a clock problem into an authorization
+        # failure. Sixty seconds is the conventional allowance and does not
+        # weaken the signature, issuer or expiry checks.
+        claims = google_id_token.verify_oauth2_token(
+            token, google_requests.Request(), clock_skew_in_seconds=60
+        )
+    except Exception as exc:  # noqa: BLE001 - an unverifiable token names nobody
+        # Say WHY. A blanket swallow here made an authorization refusal
+        # indistinguishable from a clock problem, a network problem and a
+        # genuinely forged token.
+        log_event(
+            "approver_token_unverified",
+            severity="WARNING",
+            error_type=type(exc).__name__,
+            detail=str(exc)[:160],
+        )
+        return ""
+    principal = str(claims.get("email") or "").lower()
+    if principal and claims.get("email_verified") is False:
+        return ""
+    return principal
+
+
+def _authorize_approver(authorization: str | None, required_role: str | None) -> str:
+    """Authorize the approver, and record who it was.
+
+    WHERE THE BOUNDARY ACTUALLY IS. Cloud Run IAM is what stops an unauthorized
+    caller reaching this code: `run.invoker` on this service is held by no fleet
+    identity at all, so `sa-orchestrator`, `sa-agent-systems`, `sa-executor`,
+    `sa-verifier` and anonymous callers are refused by Google before the request
+    arrives. That is proven live, and it is a stronger boundary than anything
+    this function could add.
+
+    WHAT THIS ADDS. When a caller identity IS verifiable, the principal must
+    also be bound to the role the decision asked for — defence in depth for the
+    day a service-to-service approver exists.
+
+    WHAT IT CANNOT DO, stated rather than papered over: Cloud Run does not hand
+    this application a verifiable end-user identity. The forwarded bearer token
+    fails signature verification in-container — for user credentials AND for
+    audience-scoped service tokens — so the app cannot distinguish which
+    authorized human approved. Per-role enforcement inside the app therefore
+    needs either IAP or a separate Cloud Run service per approval role, neither
+    of which is worth adding without a decision. Until then the recorded
+    principal says what is actually known.
+    """
+    principal = _verified_caller(authorization)
+    role = required_role or DEFAULT_APPROVAL_ROLE
+    if principal:
+        permitted = APPROVER_ROLE_BINDINGS.get(role, frozenset())
+        if principal not in permitted:
+            raise ApprovalForbidden(f"{principal} is not bound to {role}")
+        return principal
+    # No verifiable principal. The caller still passed Cloud Run IAM, which is
+    # the real gate; record that honestly instead of inventing a name.
+    return f"cloud-run-authenticated-invoker (role {role}, identity not verifiable)"
+
+
+#: The role an approval defaults to when a decision does not name one.
+DEFAULT_APPROVAL_ROLE = "incident_commander"
+
+
 #: Set only on a deployment that actually has Identity-Aware Proxy in front of
 #: the service. Without IAP, `X-Goog-Authenticated-User-Email` is an ordinary
 #: request header that any caller may set, so trusting it would let anyone who
@@ -1992,15 +2106,30 @@ async def _close_unapproved_incident(
 async def approve(
     approval_id: str,
     request: ApprovalDecisionRequest | None = None,
+    authorization: str | None = Header(default=None),
     x_cloud_trace_context: str | None = Header(default=None),
-    x_goog_iap_jwt_assertion: str | None = Header(default=None),
-    x_goog_authenticated_user_email: str | None = Header(default=None),
 ) -> dict[str, Any]:
     """A person authorizes one pinned decision. Idempotent."""
     trace_id = trace_id_from_header(x_cloud_trace_context)
-    approver = _approver_principal(
-        x_goog_iap_jwt_assertion, x_goog_authenticated_user_email
-    )
+    try:
+        approval = await run_in_threadpool(repository().get_approval, approval_id)
+    except ApprovalNotFound as missing:
+        raise HTTPException(status_code=404, detail="approval_not_found") from missing
+    try:
+        approver = _authorize_approver(
+            authorization, approval.get("required_approval_role")
+        )
+    except ApprovalForbidden as refused:
+        log_event(
+            "approval_forbidden",
+            severity="WARNING",
+            trace_id=trace_id,
+            approval_id=approval_id,
+            incident_id=approval.get("incident_id"),
+            required_approval_role=approval.get("required_approval_role"),
+            detail=str(refused),
+        )
+        raise HTTPException(status_code=403, detail="approver_not_authorized") from refused
     return await _record_approval_decision(
         approval_id, state="APPROVED", trace_id=trace_id, approver=approver
     )
@@ -2010,15 +2139,30 @@ async def approve(
 async def reject(
     approval_id: str,
     request: ApprovalDecisionRequest | None = None,
+    authorization: str | None = Header(default=None),
     x_cloud_trace_context: str | None = Header(default=None),
-    x_goog_iap_jwt_assertion: str | None = Header(default=None),
-    x_goog_authenticated_user_email: str | None = Header(default=None),
 ) -> dict[str, Any]:
     """A person refuses. Nothing is mutated, now or later, under this approval."""
     trace_id = trace_id_from_header(x_cloud_trace_context)
-    approver = _approver_principal(
-        x_goog_iap_jwt_assertion, x_goog_authenticated_user_email
-    )
+    try:
+        approval = await run_in_threadpool(repository().get_approval, approval_id)
+    except ApprovalNotFound as missing:
+        raise HTTPException(status_code=404, detail="approval_not_found") from missing
+    try:
+        approver = _authorize_approver(
+            authorization, approval.get("required_approval_role")
+        )
+    except ApprovalForbidden as refused:
+        log_event(
+            "approval_forbidden",
+            severity="WARNING",
+            trace_id=trace_id,
+            approval_id=approval_id,
+            incident_id=approval.get("incident_id"),
+            required_approval_role=approval.get("required_approval_role"),
+            detail=str(refused),
+        )
+        raise HTTPException(status_code=403, detail="approver_not_authorized") from refused
     return await _record_approval_decision(
         approval_id, state="REJECTED", trace_id=trace_id, approver=approver
     )
@@ -2426,11 +2570,13 @@ async def _compose_manager_status(
                 "status": str(outcome.get("final_status") or ""),
                 "specialists_consulted": consulted,
                 "network_reachable": facts.get("network_reachable"),
-                "service_responding": (
-                    None
-                    if facts.get("service_unhealthy") is None
-                    else not facts["service_unhealthy"]
-                ),
+                # The Systems finding lives in the outcome, not in the fleet
+                # facts: those carry only what the read-only specialists
+                # returned, and Systems runs through the full authorization
+                # pipeline. Reading only `facts` left the manager message
+                # silent about the application — the single most important
+                # thing they need to know.
+                "service_responding": outcome.get("service_observed_healthy"),
                 "identity_posture_sound": facts.get("identity_posture_sound"),
                 "remediation_state": str(outcome.get("final_status") or ""),
                 "awaiting_human": bool(outcome.get("approval")),

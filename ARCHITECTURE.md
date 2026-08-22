@@ -117,20 +117,22 @@ Australian Google Cloud infrastructure. Model inference does not.
 **Complete Australian data residency is not claimed anywhere in this project.**
 The competition environment uses synthetic data only.
 
-Because inference leaves the country, a classification and security boundary
-would be load-bearing rather than decorative. **No such boundary exists today.**
-Stated plainly, because the distinction matters: the duty manager's report text
-is sent to the routing agent — and therefore to the `global` endpoint —
-*without* any inspection step. `create_incident` calls `route_incident(...)`
-with the raw description.
+Because inference leaves the country, a screening step in front of the model is
+load-bearing rather than decorative. **It exists.** `create_incident` screens the
+duty manager's report through Google Model Armor in Singapore before
+`route_incident(...)` is called, and a blocked report never reaches the model at
+all — proven by log ordering under one incident id, with a control showing the
+model-invocation event present when screening allows.
 
-**PLANNED, NOT INTEGRATED.** The intended design inspects untrusted incident
-content with Model Armor in Melbourne before it reaches an agent or a tool, so
-that sensitive or policy-restricted content is never silently forwarded to the
-global endpoint. Model Armor is not integrated and that inspection does not
-happen.
+**Model Armor is not the authorization boundary, and nothing here depends on it
+being perfect.** It is a filter in front of one, and it demonstrably misses
+things: a live policy-bypass attempt passed screening and changed nothing, which
+is the result worth knowing. Authorization comes from trusted evidence gathered
+by a scoped identity, a deterministic policy decision, an exact pinned
+authorization, and IAM that bounds the blast radius. If screening were the thing
+holding the line, that miss would have been a breach instead of a non-event.
 
-The boundary that *does* hold is narrower and different in kind: untrusted
+The boundary that carries the weight is narrower and different in kind: untrusted
 report text is recorded as `UNTRUSTED_INPUT` and can never satisfy a policy
 condition, so it cannot influence an authorization decision. That protects the
 *authorization* path. It does not stop the text reaching the model, and no

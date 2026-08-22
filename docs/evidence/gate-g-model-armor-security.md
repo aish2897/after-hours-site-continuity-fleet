@@ -282,7 +282,7 @@ Gate F approval path    INC-20260820-CCEA58
 
 ## Tests
 
-**Offline: 531 passed, 11 skipped** — including 24 Gate G tests covering the
+**Offline: 575 passed, 11 skipped** — including 24 Gate G tests covering the
 verdict reader in both directions, five malformed-response shapes, a skipped
 detector, the bounded/no-retry contract, screening-before-the-model ordering, a
 blocked report never reaching the model, that a verdict never becomes `Evidence`

@@ -17,12 +17,18 @@ def test_security_agent_cannot_propose_actions():
     assert default_registry().may_propose("security") is False
 
 
-def test_only_investigators_may_propose():
+def test_only_the_systems_investigator_may_propose():
+    """Exactly one agent may propose a remediation.
+
+    Network carried `may_propose_actions: true` from the Day-1 catalog, which
+    described an intent rather than the runtime. It gathers reachability facts
+    and proposes nothing; corrected when its runtime was actually built.
+    """
     registry = default_registry()
     proposers = {
         name for name, entry in registry.agents.items() if entry.may_propose_actions
     }
-    assert proposers == {"systems", "network"}
+    assert proposers == {"systems"}
 
 
 def test_investigators_cannot_write_firestore():

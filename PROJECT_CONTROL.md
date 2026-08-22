@@ -156,7 +156,7 @@ platform failure to cite.
 | Aug 21 | Failure engineering (Gate E) | **VERIFIED** |
 | Aug 22 | Durability / HITL (Gate F) | **VERIFIED** |
 | Aug 23 | Security / Model Armor (Gate G) | **VERIFIED** |
-| Aug 24 | Fleet completion | NOT STARTED |
+| Aug 24 | Fleet completion (Gate H) | **IN PROGRESS** |
 | Aug 25 | Agent registry / lifecycle | NOT STARTED |
 | Aug 26 | Evaluation | NOT STARTED |
 | Aug 27 | Reliability | NOT STARTED |
@@ -196,11 +196,21 @@ runs · submission, demo and bonus work.
 
 LLM-backed specialists:
 
-- Orchestrator
-- Systems Investigator *(only one with a deployed runtime today)*
-- Network Investigator
-- Security / Identity Investigator
-- Continuity Coordinator
+- Orchestrator — `sa-orchestrator`
+- Systems Investigator — `sa-agent-systems` — the ONLY agent that may propose
+- Network Investigator — `sa-agent-network` — DNS/TCP/TLS reachability, read-only
+- Security / Identity Investigator — `sa-agent-security` — reads the target's
+  live Cloud Run IAM policy and ingress posture, read-only, proposes nothing
+- Continuity Coordinator — `sa-agent-continuity` — deterministic manager-facing
+  status, calls no model at all
+
+**Google Cloud Agent Registry is discovery-only for this project.** `gcloud
+agent-registry agents` offers describe/list/search and no create; `POST
+.../locations/*/agents` returns 404; `bindings create` binds two *existing*
+agents rather than registering one. A Cloud Run service cannot be registered as
+an Agent resource today, so governance uses the local runtime catalog
+(`agent_registry.json`) with `deployed` + `enabled` lifecycle flags. The blocker
+is external and is recorded rather than worked around.
 
 Deterministic, non-agent components:
 

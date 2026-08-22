@@ -34,7 +34,7 @@
       "version": "1.0.0",
       "llm_backed": false,
       "service_account": "sa-agent-network",
-      "may_propose_actions": true,
+      "may_propose_actions": false,
       "may_write_firestore": false,
       "allowed_tools": [
         "read_network_status",

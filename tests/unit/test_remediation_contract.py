@@ -161,9 +161,38 @@ def test_no_application_level_fabricated_permission_denial():
     return: no shipped module may construct a PERMISSION_DENIED or 403.
     """
     pattern = re.compile(r"(raise|return).{0,80}(PERMISSION_DENIED|403)", re.S)
+    # The one 403 this application is entitled to construct: refusing an
+    # approval it is not satisfied with. That is an authorization decision this
+    # system genuinely makes and owns — it claims nothing about what Google
+    # decided, and it is named so it cannot be confused with an infrastructure
+    # denial. Every INFRASTRUCTURE denial must still come from Google.
+    OWN_AUTHORIZATION_DECISION = "approver_not_authorized"
     offenders = []
     for path in SRC.rglob("*.py"):
         text = path.read_text(encoding="utf-8")
-        if pattern.search(text):
+        for match in pattern.finditer(text):
+            # A window PAST the match: the pattern ends at "403", so the detail
+            # that names the decision sits just beyond it.
+            window = text[match.start():match.end() + 120]
+            if OWN_AUTHORIZATION_DECISION in window:
+                continue
             offenders.append(str(path.relative_to(REPO_ROOT)))
+            break
     assert not offenders, f"fabricated permission denial found in: {offenders}"
+
+
+def test_the_only_self_issued_403_is_the_approval_refusal():
+    """Pin it, so a second one cannot be added without a decision."""
+    forbidden = re.compile(r"status_code=403")
+    sites = []
+    for path in SRC.rglob("*.py"):
+        for n, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+            if forbidden.search(line):
+                sites.append(f"{path.name}:{n}")
+    # Two: the approve and reject endpoints, which are one decision expressed
+    # at two doors. Every one must name itself.
+    assert len(sites) == 2, f"unexpected self-issued 403s: {sites}"
+    for path in SRC.rglob("*.py"):
+        for line in path.read_text(encoding="utf-8").splitlines():
+            if "status_code=403" in line:
+                assert "approver_not_authorized" in line, line.strip()
